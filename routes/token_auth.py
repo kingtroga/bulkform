@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException, status
-from supabase_client import get_supabase
-from models import RefreshTokenRequest, AuthResponse
+from services.supabase_client import get_supabase
+from models.auth_models import (
+    RefreshTokenRequest, 
+    AuthResponse
+)
 
 router = APIRouter(prefix="/api/auth", tags=["Token Management"])
 

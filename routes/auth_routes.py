@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query
-from supabase_client import get_supabase
-from auth import get_current_user
-from models import (
+from services.supabase_client import get_supabase
+from services.auth import get_current_user
+from models.auth_models import (
     SignUpRequest,
     SignInRequest,
     ResetPasswordRequest,

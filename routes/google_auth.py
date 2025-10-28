@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status, Query
-from supabase_client import get_supabase
+from services.supabase_client import get_supabase
 import os
 
 router = APIRouter(prefix="/api/auth/google", tags=["OAuth - Google"])

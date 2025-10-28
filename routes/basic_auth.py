@@ -1,7 +1,12 @@
 from fastapi import APIRouter, HTTPException, status, Depends
-from supabase_client import get_supabase
-from auth import get_current_user
-from models import SignUpRequest, SignInRequest, AuthResponse, MessageResponse
+from services.supabase_client import get_supabase
+from services.auth import get_current_user
+from models.auth_models import (
+    SignUpRequest,
+    SignInRequest, 
+    AuthResponse, 
+    MessageResponse
+)
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 

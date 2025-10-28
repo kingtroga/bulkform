@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from auth import get_current_user, get_current_user_optional
+from services.auth import get_current_user, get_current_user_optional
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
 

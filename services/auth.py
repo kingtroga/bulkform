@@ -6,7 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 import os
 from typing import Optional
-from supabase_client import get_supabase
+from services.supabase_client import get_supabase
 
 # Security scheme
 security = HTTPBearer()
