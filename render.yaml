@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     branch: main
-    buildCommand: "pip install uv && uv sync --frozen"
+    buildCommand: "apt-get update && apt-get install -y poppler-utils && pip install uv && uv sync --frozen"
     startCommand: "uv run uvicorn app:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
