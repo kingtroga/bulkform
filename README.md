@@ -8,7 +8,7 @@
 ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝      ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝
 ```
 
-**Automate PDF form filling using grid coordinates.**
+**Making the tedious automatic.**
 
 ---
 
