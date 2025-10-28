@@ -7,6 +7,7 @@ from routes.token_auth import router as token_auth_router
 from routes.password_auth import router as password_auth_router
 from routes.google_auth import router as google_auth_router
 from routes.user_routes import router as user_router
+from routes.profile import router as profile_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,6 +45,7 @@ app.include_router(token_auth_router)
 app.include_router(password_auth_router)
 app.include_router(google_auth_router)
 app.include_router(user_router)
+app.include_router(profile_router)
 
 @app.get("/")
 async def root():

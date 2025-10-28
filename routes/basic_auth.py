@@ -8,7 +8,6 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
 @router.post("/signup")
 async def signup(credentials: SignUpRequest):
-    """Sign up a new user with email/password"""
     try:
         supabase = get_supabase()
         response = supabase.auth.sign_up({
@@ -22,9 +21,12 @@ async def signup(credentials: SignUpRequest):
                 detail="Failed to create user"
             )
         
+        # Profile is auto-created by trigger, fetch it
+        profile = supabase.table("profiles").select("*").eq("id", response.user.id).single().execute()
+        
         if not response.session:
             return MessageResponse(
-                message="Account created! Please check your email to confirm your account.",
+                message="Account created! Please check your email to confirm.",
                 success=True
             )
         
@@ -32,10 +34,9 @@ async def signup(credentials: SignUpRequest):
             access_token=response.session.access_token,
             refresh_token=response.session.refresh_token,
             expires_in=response.session.expires_in or 3600,
-            user={
+            user=profile.data if profile.data else {
                 "id": response.user.id,
-                "email": response.user.email,
-                "created_at": str(response.user.created_at)
+                "email": response.user.email
             }
         )
     except Exception as e:

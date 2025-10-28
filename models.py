@@ -1,4 +1,6 @@
 from pydantic import BaseModel, EmailStr
+from typing import Optional
+from datetime import datetime
 
 # ============================================================================
 # AUTH MODELS
@@ -58,6 +60,34 @@ class UserProfile(BaseModel):
     role: str
     metadata: dict = {}
 
+# ============================================================================
+# PROFILE MODELS
+# ============================================================================
+
+class ProfileBase(BaseModel):
+    email: EmailStr
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+    
+class ProfileCreate(ProfileBase):
+    pass
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    phone: Optional[str] = None
+    company: Optional[str] = None
+
+class ProfileResponse(ProfileBase):
+    id: str
+    role: str
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
 
 # ============================================================================
 # TODO: Add more models as you build features
