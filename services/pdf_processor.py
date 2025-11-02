@@ -374,3 +374,57 @@ class PDFProcessor:
         
         except Exception as e:
             raise Exception(f"Failed to restore session: {str(e)}")
+        
+    def apply_grid_to_page(self, session_id: str, page_num: int) -> str:
+        """
+        Apply grid overlay to a page image
+        
+        Args:
+            session_id: Session identifier
+            page_num: Page number
+            
+        Returns:
+            Path to gridded image
+        """
+        input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+        
+        # Create gridded folder for session
+        gridded_folder = f"{self.GRIDDED_FOLDER}/{session_id}"
+        os.makedirs(gridded_folder, exist_ok=True)
+        output_path = f"{gridded_folder}/page_{page_num}_gridded.png"
+        
+        img = Image.open(input_path)
+        width, height = img.size
+        
+        cell_width = width / self.GRID_SIZE
+        cell_height = height / self.GRID_SIZE
+        
+        draw = ImageDraw.Draw(img)
+        
+        # Draw grid lines
+        for i in range(self.GRID_SIZE + 1):
+            x = int(i * cell_width)
+            y = int(i * cell_height)
+            
+            line_width = 3 if i % 10 == 0 else 1
+            line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
+            
+            draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
+            draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
+        
+        # Add grid labels
+        try:
+            font_size = max(8, int(width / 150))
+            font = ImageFont.truetype("fonts/arial.ttf", font_size)
+        except:
+            font = ImageFont.load_default()
+        
+        for i in range(0, self.GRID_SIZE + 1, 10):  # Every 10 lines
+            x = int(i * cell_width)
+            y = int(i * cell_height)
+            draw.text((x + 2, 2), f"{i}", fill=(255, 0, 0), font=font)
+            draw.text((2, y + 2), f"{i}", fill=(0, 0, 255), font=font)
+        
+        img.save(output_path)
+        print(f"Applied grid to page {page_num}")
+        return output_path

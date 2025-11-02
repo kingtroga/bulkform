@@ -636,3 +636,42 @@ async def preview_all_pages(
             for i in range(1, num_pages + 1)
         ]
     }
+
+@router.get("/gridded/{session_id}/page/{page_number}")
+async def get_gridded_page(
+    session_id: str,
+    page_number: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get page with grid overlay
+    
+    🔒 PROTECTED
+    📏 Shows 150x150 grid for coordinate reference
+    
+    Use case:
+        API users can see the grid to determine coordinates
+    """
+    # Verify ownership
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Restore if needed
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+        
+        # Generate gridded image
+        gridded_path = pdf_processor.apply_grid_to_page(session_id, page_number)
+        
+        return FileResponse(gridded_path, media_type="image/png")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Grid generation failed: {str(e)}")
