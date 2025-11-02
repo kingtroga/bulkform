@@ -1,8 +1,9 @@
 """
-PDF Routes - Complete Form Filling API
+PDF Routes - FULLY ASYNC OPTIMIZED (FIXED)
 🔒 Protected with JWT authentication
 💾 Database-backed sessions (survives restarts!)
 ☁️  Supabase Storage for PDFs
+⚡ TRUE ASYNC - No blocking, no pickle errors!
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
 from fastapi.responses import FileResponse
@@ -22,6 +23,9 @@ import shutil
 import uuid
 from typing import Optional
 from datetime import datetime
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 router = APIRouter(prefix="/api/pdf", tags=["PDF Processing"])
 
@@ -29,6 +33,36 @@ router = APIRouter(prefix="/api/pdf", tags=["PDF Processing"])
 pdf_processor = PDFProcessor()
 session_service = SessionService()
 
+# ============================================================================
+# ASYNC EXECUTOR - Single Thread Pool (Avoids Pickle Issues!)
+# ============================================================================
+
+# Why only ThreadPoolExecutor?
+# - ProcessPoolExecutor can't pickle Supabase client (has thread locks)
+# - ThreadPoolExecutor is fast enough for our use case
+# - Can handle both I/O and CPU work effectively with enough threads
+
+executor = ThreadPoolExecutor(max_workers=30, thread_name_prefix="bulkform")
+
+print("✅ Async executor initialized: 30 threads")
+
+
+# ============================================================================
+# HELPER FUNCTION
+# ============================================================================
+
+async def run_async(func, *args, **kwargs):
+    """Run any blocking operation in thread pool"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        executor,
+        partial(func, *args, **kwargs)
+    )
+
+
+# ============================================================================
+# UPLOAD ENDPOINTS
+# ============================================================================
 
 @router.post("/upload", response_model=GridResponse)
 async def upload_pdf(
@@ -40,17 +74,7 @@ async def upload_pdf(
     
     🔒 PROTECTED - Requires JWT token
     💾 Session saved to database (survives server restarts!)
-    
-    Steps:
-    1. Verify user authentication
-    2. Upload PDF file
-    3. Convert pages to images at 300 DPI
-    4. Calculate 150x150 grid dimensions
-    5. Save session to database
-    6. Return coordinates + session_id
-    
-    Returns:
-        GridResponse with session_id for subsequent operations
+    ⚡ TRULY ASYNC - Non-blocking!
     """
     # Validate file type
     if not file.filename.lower().endswith('.pdf'):
@@ -61,28 +85,49 @@ async def upload_pdf(
     user_id = current_user['id']
     
     try:
-        # Save uploaded PDF temporarily
+        # Prepare paths
         upload_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         os.makedirs(upload_path, exist_ok=True)
         pdf_path = f"{upload_path}/original.pdf"
         
-        with open(pdf_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # 🔥 ALSO upload to Supabase Storage (permanent backup)
-        storage_path = pdf_processor.upload_original_pdf(pdf_path, user_id, session_id)
+        # ⚡ ASYNC: Read file content
+        file_content = await file.read()
         
-        # Convert to images and get dimensions
-        num_pages = pdf_processor.pdf_to_images(pdf_path, session_id)
-        page_dimensions = pdf_processor.get_all_page_dimensions(session_id, num_pages)
+        # ⚡ ASYNC: Save uploaded PDF
+        await run_async(lambda: open(pdf_path, "wb").write(file_content))
         
-        # 🔥 Store session in DATABASE (not memory!)
-        session_service.create_session(
-            session_id=session_id,
-            user_id=user_id,
-            filename=file.filename,
-            num_pages=num_pages
+        # ⚡ ASYNC: Upload to Supabase Storage
+        storage_path = await run_async(
+            pdf_processor.upload_original_pdf,
+            pdf_path,
+            user_id,
+            session_id
         )
+        
+        # ⚡ ASYNC: Convert to images (CPU-intensive but in thread pool)
+        num_pages = await run_async(
+            pdf_processor.pdf_to_images,
+            pdf_path,
+            session_id
+        )
+        
+        # ⚡ ASYNC: Get dimensions
+        page_dimensions = await run_async(
+            pdf_processor.get_all_page_dimensions,
+            session_id,
+            num_pages
+        )
+        
+        # ⚡ ASYNC: Save session to database
+        await run_async(
+            session_service.create_session,
+            session_id,
+            user_id,
+            file.filename,
+            num_pages
+        )
+        
+        print(f"✅ Upload complete: {session_id} ({num_pages} pages) - ASYNC!")
         
         return GridResponse(
             total_pages=num_pages,
@@ -93,51 +138,61 @@ async def upload_pdf(
     
     except Exception as e:
         # Cleanup on error
-        pdf_processor.cleanup_folders(session_id)
+        await run_async(pdf_processor.cleanup_folders, session_id)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
 
 @router.post("/upload-encrypted", response_model=EncryptedGridResponse)
 async def upload_pdf_encrypted(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Upload PDF and return ENCRYPTED grid coordinates
-    
-    🔒 PROTECTED
-    🔐 Grid data encrypted to protect your idea
-    """
-    # Validate file type
+    """Upload PDF and return ENCRYPTED grid coordinates"""
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
     
-    # Generate unique session ID
     session_id = str(uuid.uuid4())
     user_id = current_user['id']
     
     try:
-        # Save uploaded PDF temporarily
         upload_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         os.makedirs(upload_path, exist_ok=True)
         pdf_path = f"{upload_path}/original.pdf"
         
-        with open(pdf_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # 🔥 ALSO upload to Supabase Storage (permanent backup)
-        storage_path = pdf_processor.upload_original_pdf(pdf_path, user_id, session_id)
+        file_content = await file.read()
+        await run_async(lambda: open(pdf_path, "wb").write(file_content))
         
-        # Convert to images and get dimensions
-        num_pages = pdf_processor.pdf_to_images(pdf_path, session_id)
+        storage_path = await run_async(
+            pdf_processor.upload_original_pdf,
+            pdf_path,
+            user_id,
+            session_id
+        )
         
-        # Get grid data
-        page_dimensions = pdf_processor.get_all_page_dimensions(session_id, num_pages)
+        num_pages = await run_async(
+            pdf_processor.pdf_to_images,
+            pdf_path,
+            session_id
+        )
         
-        # 🔥 ENCRYPT the grid data
-        encrypted_grid = encrypt_grid_data({
-            "pages": page_dimensions,
-            "dpi": pdf_processor.DPI
-        })
+        page_dimensions = await run_async(
+            pdf_processor.get_all_page_dimensions,
+            session_id,
+            num_pages
+        )
+        
+        encrypted_grid = await run_async(
+            encrypt_grid_data,
+            {"pages": page_dimensions, "dpi": pdf_processor.DPI}
+        )
+        
+        await run_async(
+            session_service.create_session,
+            session_id,
+            user_id,
+            file.filename,
+            num_pages
+        )
         
         return EncryptedGridResponse(
             encrypted_data=encrypted_grid,
@@ -147,8 +202,13 @@ async def upload_pdf_encrypted(
         )
     
     except Exception as e:
-        pdf_processor.cleanup_folders(session_id)
+        await run_async(pdf_processor.cleanup_folders, session_id)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
+# ============================================================================
+# FILL TEXT ENDPOINTS
+# ============================================================================
 
 @router.post("/fill-text", response_model=FillTextResponse)
 async def fill_text(
@@ -156,50 +216,39 @@ async def fill_text(
     request: FillTextRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Fill text on a specific PDF page
-    
-    🔒 PROTECTED - Can only modify your own PDFs
-    
-    Args:
-        session_id: Session ID from upload
-        request: Text data with grid coordinates
-        
-    Returns:
-        FillTextResponse with number of items added
-    """
-     # Verify ownership
+    """Fill text on a specific PDF page"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     try:
-        # 🔥 CHECK IF SESSION NEEDS RESTORATION
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         
         if not os.path.exists(session_temp_path):
-            # Session was cleaned up - restore from storage
-            print(f"⚠️  Session {session_id} not in temp folder. Restoring from storage...")
+            print(f"⚠️  Restoring session {session_id}...")
             
             if session["status"] == "completed":
-                # Restore from Supabase Storage
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
-                
-                # Update status back to processing
-                session_service.update_session_status(session_id, "processing")
+                await run_async(
+                    session_service.update_session_status,
+                    session_id,
+                    "processing"
+                )
             else:
                 raise HTTPException(
                     status_code=404,
-                    detail="Session not found and cannot be restored (no original PDF)"
+                    detail="Session not found and cannot be restored"
                 )
         
-        # Now proceed with filling text
         text_data = [item.dict() for item in request.text_data]
-        pdf_processor.write_text_on_page(
+        
+        await run_async(
+            pdf_processor.write_text_on_page,
             session_id,
             request.page_number,
             text_data
@@ -215,59 +264,48 @@ async def fill_text(
         if "No such file or directory" in error_message:
             raise HTTPException(
                 status_code=400,
-                detail="It looks like the file or page you’re trying to modify doesn’t exist. "
-                    "Please make sure the PDF session and page number are valid."
+                detail="File or page doesn't exist. Check session and page number."
             )
         else:
             raise HTTPException(status_code=500, detail=f"Fill text failed: {error_message}")
-        
+
+
 @router.post("/fill-text-encrypted", response_model=FillTextResponse)
 async def fill_text_encrypted(
     request: EncryptedFillTextRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Fill text on PDF (encrypted - protects your API)
-    
-    🔒 PROTECTED
-    🔐 Grid coordinates encrypted in transit
-    
-    Frontend must:
-    1. Encrypt fill data using shared key
-    2. Send encrypted_data string
-    3. Backend decrypts and processes
-    """
+    """Fill text on PDF (encrypted)"""
     try:
-        # Decrypt the payload
-        decrypted = decrypt_data(request.encrypted_data)
+        decrypted = await run_async(decrypt_data, request.encrypted_data)
         
         session_id = request.session_id
         page_number = decrypted["page_number"]
         text_data = decrypted["text_data"]
         
-        # Verify ownership
         session = session_service.get_session(session_id)
         if not session or session["user_id"] != current_user['id']:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
-        # Restore session if needed
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         if not os.path.exists(session_temp_path):
             if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
-                session_service.update_session_status(session_id, "processing")
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Session not found and cannot be restored"
+                await run_async(
+                    session_service.update_session_status,
+                    session_id,
+                    "processing"
                 )
+            else:
+                raise HTTPException(status_code=404, detail="Session not found")
         
-        # Process the text
-        pdf_processor.write_text_on_page(
+        await run_async(
+            pdf_processor.write_text_on_page,
             session_id,
             page_number,
             text_data
@@ -284,6 +322,10 @@ async def fill_text_encrypted(
         raise HTTPException(status_code=500, detail=f"Fill text failed: {str(e)}")
 
 
+# ============================================================================
+# IMAGE OPERATIONS
+# ============================================================================
+
 @router.post("/add-image", response_model=AddImageResponse)
 async def add_image(
     session_id: str = Form(...),
@@ -295,12 +337,7 @@ async def add_image(
     image_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Add generic image to PDF
-    
-    🔒 PROTECTED
-    🖼️ For logos, photos, etc.
-    """
+    """Add generic image to PDF"""
     return await _add_image_helper(
         session_id, page_number, x, y, width, height, 
         image_file, current_user, "images"
@@ -318,19 +355,13 @@ async def add_stamp(
     stamp_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Add stamp to PDF
-    
-    🔒 PROTECTED
-    🏢 For company stamps, seals, etc.
-    """
+    """Add stamp to PDF"""
     return await _add_image_helper(
         session_id, page_number, x, y, width, height, 
         stamp_file, current_user, "stamps"
     )
 
 
-# Keep existing add_signature endpoint but rename internally
 @router.post("/add-signature", response_model=AddImageResponse)
 async def add_signature(
     session_id: str = Form(...),
@@ -342,12 +373,7 @@ async def add_signature(
     signature_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Add signature to PDF
-    
-    🔒 PROTECTED
-    ✍️ For personal signatures
-    """
+    """Add signature to PDF"""
     return await _add_image_helper(
         session_id, page_number, x, y, width, height, 
         signature_file, current_user, "signatures"
@@ -363,52 +389,48 @@ async def _add_image_helper(
     height: Optional[int],
     image_file: UploadFile,
     current_user: dict,
-    subfolder: str  # "images", "stamps", or "signatures"
+    subfolder: str
 ):
     """Shared logic for adding images/stamps/signatures"""
     
-    # Verify ownership
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Validate file type
     if not image_file.content_type in ["image/png", "image/jpeg", "image/jpg"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Only PNG and JPG images allowed"
-        )
+        raise HTTPException(status_code=400, detail="Only PNG and JPG allowed")
     
     try:
-        # Restore session if needed
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         if not os.path.exists(session_temp_path):
             if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
-                session_service.update_session_status(session_id, "processing")
+                await run_async(
+                    session_service.update_session_status,
+                    session_id,
+                    "processing"
+                )
         
-        # Save image to appropriate subfolder
         images_folder = f"{pdf_processor.TEMP_FOLDER}/{session_id}/{subfolder}"
         os.makedirs(images_folder, exist_ok=True)
-        
         image_path = f"{images_folder}/{image_file.filename}"
         
-        with open(image_path, "wb") as buffer:
-            shutil.copyfileobj(image_file.file, buffer)
+        image_content = await image_file.read()
+        await run_async(lambda: open(image_path, "wb").write(image_content))
         
-        # Prepare image data
         image_data = [{'x': x, 'y': y, 'image_path': image_path}]
         
         if width and height:
             image_data[0]['width'] = width
             image_data[0]['height'] = height
         
-        # Add to page
-        pdf_processor.add_images_to_page(
+        await run_async(
+            pdf_processor.add_images_to_page,
             session_id,
             page_number,
             image_data
@@ -423,52 +445,44 @@ async def _add_image_helper(
         raise HTTPException(status_code=500, detail=f"Add {subfolder} failed: {str(e)}")
 
 
+# ============================================================================
+# GENERATE PDF
+# ============================================================================
+
 @router.post("/generate", response_model=GeneratePDFResponse)
 async def generate_pdf(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Generate final filled PDF and upload to Supabase Storage
-    
-    🔒 PROTECTED - Can only generate your own PDFs
-    ☁️  Uploads to Supabase Storage
-    💾 Updates session status in database
-    
-    Args:
-        session_id: Session ID from upload
-        
-    Returns:
-        GeneratePDFResponse with download URL
-    """
-    # 🔥 Get session from DATABASE
+    """Generate final filled PDF and upload to Supabase Storage"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
-        raise HTTPException(
-            status_code=403, 
-            detail="Session not found or unauthorized"
-        )
+        raise HTTPException(status_code=403, detail="Unauthorized")
     
     try:
         user_id = current_user['id']
         num_pages = session["num_pages"]
         
-        # Create PDF and upload to Supabase Storage
-        result = pdf_processor.create_pdf_with_upload(
-            session_id=session_id,
-            user_id=user_id,
-            num_pages=num_pages
+        # ⚡ ASYNC: Create PDF
+        result = await run_async(
+            pdf_processor.create_pdf_with_upload,
+            session_id,
+            user_id,
+            num_pages
         )
         
-        # 🔥 Update session status in DATABASE
-        session_service.update_session_status(
-            session_id=session_id,
-            status="completed",
-            storage_path=result["storage_path"]
+        # ⚡ ASYNC: Update session
+        await run_async(
+            session_service.update_session_status,
+            session_id,
+            "completed",
+            result["storage_path"]
         )
         
-        # Cleanup local files
-        pdf_processor.cleanup_folders(session_id)
+        # ⚡ ASYNC: Cleanup
+        await run_async(pdf_processor.cleanup_folders, session_id)
+        
+        print(f"✅ PDF generated: {session_id}")
         
         return GeneratePDFResponse(
             pdf_url=result["storage_url"],
@@ -477,25 +491,176 @@ async def generate_pdf(
         )
     
     except Exception as e:
-        # Mark as failed in database
-        session_service.update_session_status(session_id, "failed")
+        await run_async(
+            session_service.update_session_status,
+            session_id,
+            "failed"
+        )
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
+# ============================================================================
+# BATCH OPERATIONS (PARALLEL!)
+# ============================================================================
+
+@router.post("/fill-text-batch", response_model=BatchFillTextResponse)
+async def fill_text_batch(
+    session_id: str,
+    request: BatchFillTextRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Fill text on MULTIPLE pages at once - IN PARALLEL!"""
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        
+        if not os.path.exists(session_temp_path):
+            print(f"⚠️  Restoring session {session_id}...")
+            
+            if session["status"] == "completed":
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+                await run_async(
+                    session_service.update_session_status,
+                    session_id,
+                    "processing"
+                )
+            else:
+                raise HTTPException(status_code=404, detail="Session not found")
+        
+        # 🚀 PARALLEL PROCESSING!
+        tasks = []
+        page_numbers = []
+        
+        for page_request in request.pages:
+            text_data = [item.dict() for item in page_request.text_data]
+            
+            task = run_async(
+                pdf_processor.write_text_on_page,
+                session_id,
+                page_request.page_number,
+                text_data
+            )
+            
+            tasks.append(task)
+            page_numbers.append(page_request.page_number)
+        
+        print(f"🚀 Processing {len(tasks)} pages in PARALLEL...")
+        await asyncio.gather(*tasks)
+        print(f"✅ All {len(tasks)} pages completed!")
+        
+        total_items_added = sum(
+            len(page_request.text_data) 
+            for page_request in request.pages
+        )
+        
+        return BatchFillTextResponse(
+            session_id=session_id,
+            total_pages_filled=len(page_numbers),
+            total_items_added=total_items_added,
+            pages_processed=page_numbers
+        )
+    
+    except Exception as e:
+        error_message = str(e)
+        if "No such file or directory" in error_message:
+            raise HTTPException(status_code=400, detail="File or page doesn't exist")
+        else:
+            raise HTTPException(status_code=500, detail=f"Batch fill failed: {error_message}")
+
+
+@router.post("/fill-text-batch-encrypted", response_model=BatchFillTextResponse)
+async def fill_text_batch_encrypted(
+    request: EncryptedBatchFillTextRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Fill text on MULTIPLE pages (ENCRYPTED) - IN PARALLEL!"""
+    try:
+        decrypted = await run_async(decrypt_data, request.encrypted_data)
+        
+        session_id = request.session_id
+        pages_data = decrypted["pages"]
+        
+        session = session_service.get_session(session_id)
+        if not session or session["user_id"] != current_user['id']:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+                await run_async(
+                    session_service.update_session_status,
+                    session_id,
+                    "processing"
+                )
+            else:
+                raise HTTPException(status_code=404, detail="Session not found")
+        
+        # 🚀 PARALLEL PROCESSING!
+        tasks = []
+        page_numbers = []
+        
+        for page_data in pages_data:
+            page_number = page_data["page_number"]
+            text_data = page_data["text_data"]
+            
+            task = run_async(
+                pdf_processor.write_text_on_page,
+                session_id,
+                page_number,
+                text_data
+            )
+            
+            tasks.append(task)
+            page_numbers.append(page_number)
+        
+        print(f"🚀 Processing {len(tasks)} encrypted pages in PARALLEL...")
+        await asyncio.gather(*tasks)
+        print(f"✅ All {len(tasks)} pages completed!")
+        
+        total_items_added = sum(
+            len(page_data["text_data"]) 
+            for page_data in pages_data
+        )
+        
+        return BatchFillTextResponse(
+            session_id=session_id,
+            total_pages_filled=len(page_numbers),
+            total_items_added=total_items_added,
+            pages_processed=page_numbers
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch fill failed: {str(e)}")
+
+
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+
 @router.get("/my-sessions", response_model=UserSessionsResponse)
 async def get_my_sessions(current_user: dict = Depends(get_current_user)):
-    """
-    Get all PDF sessions for current user
+    """Get all PDF sessions for current user"""
+    sessions = await run_async(
+        session_service.get_user_sessions,
+        current_user['id']
+    )
     
-    🔒 PROTECTED
-    💾 Retrieves from DATABASE
-    
-    Returns:
-        List of all user's PDF sessions (newest first)
-    """
-    sessions = session_service.get_user_sessions(current_user['id'])
-    
-    # Convert to SessionInfo models
     session_infos = [
         SessionInfo(
             session_id=s["session_id"],
@@ -521,30 +686,12 @@ async def delete_session(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Delete a PDF session
-    
-    🔒 PROTECTED - Can only delete your own sessions
-    🗑️  Removes from database and cleans up files
-    
-    Args:
-        session_id: Session to delete
-        
-    Returns:
-        Success message
-    """
-    # Verify ownership
+    """Delete a PDF session"""
     if not session_service.verify_session_ownership(session_id, current_user['id']):
-        raise HTTPException(
-            status_code=403, 
-            detail="Session not found or unauthorized"
-        )
+        raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Cleanup local files
-    pdf_processor.cleanup_folders(session_id)
-    
-    # Remove from database
-    session_service.delete_session(session_id)
+    await run_async(pdf_processor.cleanup_folders, session_id)
+    await run_async(session_service.delete_session, session_id)
     
     return {
         "message": "Session deleted successfully",
@@ -552,58 +699,29 @@ async def delete_session(
     }
 
 
-@router.get("/health")
-async def pdf_health():
-    """
-    Health check for PDF service
-    ✅ PUBLIC - No auth required
-    """
-    return {
-        "service": "PDF Processing",
-        "status": "operational",
-        "session_storage": "supabase_database",
-        "file_storage": "supabase_storage",
-        "grid_size": pdf_processor.GRID_SIZE,
-        "dpi": pdf_processor.DPI
-    }
-
 @router.get("/history", response_model=UserSessionsResponse)
 async def get_pdf_history(
     limit: int = 50,
-    status: Optional[str] = None,  # Filter by status: completed, processing, failed
+    status: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get user's complete PDF history
-    
-    🔒 PROTECTED - Shows only your PDFs
-    📊 Returns all PDFs you've ever filled
-    
-    Query params:
-        - limit: Number of results (default 50, max 100)
-        - status: Filter by status (completed, processing, failed)
-    
-    Use case:
-        "Show me all the forms I filled this month"
-    """
+    """Get user's complete PDF history"""
     if limit > 100:
         limit = 100
     
-    # Get sessions from database
-    query = session_service.supabase.table("pdf_sessions").select("*").eq(
-        "user_id", current_user['id']
-    )
+    def _get_history():
+        query = session_service.supabase.table("pdf_sessions").select("*").eq(
+            "user_id", current_user['id']
+        )
+        
+        if status:
+            query = query.eq("status", status)
+        
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data if result.data else []
     
-    # Filter by status if provided
-    if status:
-        query = query.eq("status", status)
+    sessions = await run_async(_get_history)
     
-    # Order by newest first, limit results
-    result = query.order("created_at", desc=True).limit(limit).execute()
-    
-    sessions = result.data if result.data else []
-    
-    # Convert to SessionInfo models
     session_infos = [
         SessionInfo(
             session_id=s["session_id"],
@@ -629,54 +747,40 @@ async def download_pdf(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Download a previously filled PDF
-    
-    🔒 PROTECTED - Can only download your own PDFs
-    🔐 Generates fresh signed URL (expires in 1 hour)
-    📊 Tracks download count
-    
-    Returns:
-        Fresh signed URL to download the PDF
-    """
-    # Verify ownership
+    """Download a previously filled PDF"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
-        raise HTTPException(
-            status_code=403,
-            detail="Session not found or unauthorized"
-        )
+        raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Check if PDF was completed
     if session["status"] != "completed":
         raise HTTPException(
             status_code=400,
-            detail=f"PDF is not ready yet (status: {session['status']})"
+            detail=f"PDF not ready (status: {session['status']})"
         )
     
     if not session.get("storage_path"):
-        raise HTTPException(
-            status_code=404,
-            detail="PDF file not found in storage"
-        )
+        raise HTTPException(status_code=404, detail="PDF not found")
     
     try:
-        # Generate fresh signed URL (1 hour expiry)
-        signed_url_response = pdf_processor.supabase.storage.from_(
-            pdf_processor.STORAGE_BUCKET
-        ).create_signed_url(
-            session["storage_path"],
-            3600  # 1 hour
+        def _create_signed_url():
+            signed_url_response = pdf_processor.supabase.storage.from_(
+                pdf_processor.STORAGE_BUCKET
+            ).create_signed_url(session["storage_path"], 3600)
+            return signed_url_response['signedURL']
+        
+        def _update_download_count():
+            session_service.supabase.table("pdf_sessions").update({
+                "download_count": session.get("download_count", 0) + 1,
+                "last_downloaded_at": datetime.now().isoformat()
+            }).eq("session_id", session_id).execute()
+        
+        signed_url, _ = await asyncio.gather(
+            run_async(_create_signed_url),
+            run_async(_update_download_count)
         )
         
-        # Update download count
-        session_service.supabase.table("pdf_sessions").update({
-            "download_count": session.get("download_count", 0) + 1,
-            "last_downloaded_at": datetime.now().isoformat()
-        }).eq("session_id", session_id).execute()
-        
         return {
-            "download_url": signed_url_response['signedURL'],
+            "download_url": signed_url,
             "filename": session["filename"],
             "expires_in_seconds": 3600,
             "message": "Download link expires in 1 hour"
@@ -692,20 +796,21 @@ async def download_pdf(
 @router.get("/stats")
 async def get_user_stats(current_user: dict = Depends(get_current_user)):
     """Get user's PDF filling statistics"""
-    
     user_id = current_user['id']
-    all_sessions = session_service.get_user_sessions(user_id, limit=1000)
     
-    # Calculate stats
+    all_sessions = await run_async(
+        session_service.get_user_sessions,
+        user_id,
+        limit=1000
+    )
+    
     total_pdfs = len(all_sessions)
     completed = len([s for s in all_sessions if s["status"] == "completed"])
     processing = len([s for s in all_sessions if s["status"] == "processing"])
     failed = len([s for s in all_sessions if s["status"] == "failed"])
     
-    # Fix timezone comparison
     from datetime import datetime, timezone
     
-    # Make month_start timezone-aware
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
@@ -714,9 +819,7 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
         try:
             created_at_str = s["created_at"]
             
-            # Handle string datetime
             if isinstance(created_at_str, str):
-                # Remove 'Z' and add '+00:00' for ISO format
                 if created_at_str.endswith('Z'):
                     created_at_str = created_at_str[:-1] + '+00:00'
                 
@@ -724,7 +827,6 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
             else:
                 created_at = created_at_str
             
-            # Ensure timezone-aware
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=timezone.utc)
             
@@ -732,7 +834,6 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
                 this_month += 1
         
         except Exception as e:
-            print(f"⚠️  Error parsing date for session: {e}")
             continue
     
     return {
@@ -745,38 +846,33 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
         "success_rate": round((completed / total_pdfs * 100) if total_pdfs > 0 else 0, 2)
     }
 
+
+# ============================================================================
+# PREVIEW ENDPOINTS
+# ============================================================================
+
 @router.get("/preview/{session_id}/page/{page_number}")
 async def preview_page(
     session_id: str,
     page_number: int,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Preview a specific page (with or without edits)
-    
-    🔒 PROTECTED
-    📸 Returns the page image (filled or original)
-    
-    Use case:
-        See what your filled form looks like before generating final PDF
-    """
-    # Verify ownership
+    """Preview a specific page"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     try:
-        # Check if session needs restoration
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         if not os.path.exists(session_temp_path):
             if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
         
-        # Try filled page first, fall back to original
         filled_path = f"{pdf_processor.OUTPUT_FOLDER}/{session_id}/page_{page_number}_filled.png"
         original_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}/page_{page_number}.png"
         
@@ -789,19 +885,14 @@ async def preview_page(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
-    
+
+
 @router.get("/preview/{session_id}/all-pages")
 async def preview_all_pages(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get URLs to preview all pages
-    
-    🔒 PROTECTED
-    📸 Returns list of preview URLs for each page
-    """
-    # Verify ownership
+    """Get URLs to preview all pages"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
@@ -817,45 +908,45 @@ async def preview_all_pages(
         ]
     }
 
+
 @router.get("/gridded/{session_id}/page/{page_number}")
 async def get_gridded_page(
     session_id: str,
     page_number: int,
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get page with grid overlay
-    
-    🔒 PROTECTED
-    📏 Shows 150x150 grid for coordinate reference
-    
-    Use case:
-        API users can see the grid to determine coordinates
-    """
-    # Verify ownership
+    """Get page with grid overlay"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     try:
-        # Restore if needed
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         if not os.path.exists(session_temp_path):
             if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
         
-        # Generate gridded image
-        gridded_path = pdf_processor.apply_grid_to_page(session_id, page_number)
+        gridded_path = await run_async(
+            pdf_processor.apply_grid_to_page,
+            session_id,
+            page_number
+        )
         
         return FileResponse(gridded_path, media_type="image/png")
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Grid generation failed: {str(e)}")
-    
+
+
+# ============================================================================
+# FONT MANAGEMENT
+# ============================================================================
+
 @router.post("/upload-font/{session_id}")
 async def upload_custom_font(
     session_id: str,
@@ -863,40 +954,32 @@ async def upload_custom_font(
     font_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Upload custom font for session
-    
-    🔒 PROTECTED
-    🔤 Font available for this session only
-    """
-    # Verify ownership
+    """Upload custom font for session"""
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    # Validate file type
     if not font_file.filename.lower().endswith('.ttf'):
         raise HTTPException(status_code=400, detail="Only TTF fonts allowed")
     
     try:
-        # Restore session if needed
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
         if not os.path.exists(session_temp_path):
             if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
                     session_id,
                     current_user['id'],
                     session["storage_path"]
                 )
         
-        # Save font
         fonts_folder = f"fonts"
         os.makedirs(fonts_folder, exist_ok=True)
         
         font_path = f"{fonts_folder}/{font_name}.ttf"
         
-        with open(font_path, "wb") as buffer:
-            shutil.copyfileobj(font_file.file, buffer)
+        font_content = await font_file.read()
+        await run_async(lambda: open(font_path, "wb").write(font_content))
         
         return {
             "message": f"Font '{font_name}' uploaded successfully",
@@ -906,15 +989,11 @@ async def upload_custom_font(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Font upload failed: {str(e)}")
-    
+
+
 @router.get("/available-fonts")
 async def get_available_fonts():
-    """
-    Get list of built-in fonts (auto-detected)
-    
-    ✅ PUBLIC
-    🔄 Auto-scans fonts/ directory
-    """
+    """Get list of built-in fonts"""
     from services.pdf_processor import AVAILABLE_FONTS
     
     return {
@@ -925,189 +1004,37 @@ async def get_available_fonts():
         "upload_endpoint": "POST /api/pdf/upload-font/{session_id}"
     }
 
-@router.post("/fill-text-batch", response_model=BatchFillTextResponse)
-async def fill_text_batch(
-    session_id: str,
-    request: BatchFillTextRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Fill text on MULTIPLE pages at once
-    
-    🔒 PROTECTED - Can only modify your own PDFs
-    🚀 Process multiple pages in one request
-    
-    Args:
-        session_id: Session ID from upload
-        request: List of page fill requests
-        
-    Returns:
-        BatchFillTextResponse with summary of all pages processed
-        
-    Example request body:
-    {
-      "pages": [
-        {
-          "page_number": 1,
-          "text_data": [{"x": 10, "y": 20, "text": "Page 1 data", ...}]
-        },
-        {
-          "page_number": 2,
-          "text_data": [{"x": 30, "y": 40, "text": "Page 2 data", ...}]
-        }
-      ]
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@router.get("/health")
+async def pdf_health():
+    """Health check for PDF service"""
+    return {
+        "service": "PDF Processing",
+        "status": "operational",
+        "async_mode": "TRUE_ASYNC",
+        "thread_workers": 30,
+        "parallel_batch_processing": True,
+        "session_storage": "supabase_database",
+        "file_storage": "supabase_storage",
+        "grid_size": pdf_processor.GRID_SIZE,
+        "dpi": pdf_processor.DPI
     }
-    """
-    # Verify ownership
-    session = session_service.get_session(session_id)
-    if not session or session["user_id"] != current_user['id']:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    try:
-        # CHECK IF SESSION NEEDS RESTORATION
-        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
-        
-        if not os.path.exists(session_temp_path):
-            print(f"⚠️  Session {session_id} not in temp folder. Restoring from storage...")
-            
-            if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
-                    session_id,
-                    current_user['id'],
-                    session["storage_path"]
-                )
-                session_service.update_session_status(session_id, "processing")
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Session not found and cannot be restored (no original PDF)"
-                )
-        
-        # Process each page
-        total_items_added = 0
-        pages_processed = []
-        
-        for page_request in request.pages:
-            text_data = [item.dict() for item in page_request.text_data]
-            
-            # Fill this page
-            pdf_processor.write_text_on_page(
-                session_id,
-                page_request.page_number,
-                text_data
-            )
-            
-            total_items_added += len(text_data)
-            pages_processed.append(page_request.page_number)
-            
-            print(f"✅ Filled page {page_request.page_number} with {len(text_data)} items")
-        
-        return BatchFillTextResponse(
-            session_id=session_id,
-            total_pages_filled=len(pages_processed),
-            total_items_added=total_items_added,
-            pages_processed=pages_processed
-        )
-    
-    except Exception as e:
-        error_message = str(e)
-        if "No such file or directory" in error_message:
-            raise HTTPException(
-                status_code=400,
-                detail="It looks like the file or page you're trying to modify doesn't exist. "
-                       "Please make sure the PDF session and page numbers are valid."
-            )
-        else:
-            raise HTTPException(status_code=500, detail=f"Batch fill text failed: {error_message}")
 
 
-@router.post("/fill-text-batch-encrypted", response_model=BatchFillTextResponse)
-async def fill_text_batch_encrypted(
-    request: EncryptedBatchFillTextRequest,
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Fill text on MULTIPLE pages at once (ENCRYPTED)
-    
-    🔒 PROTECTED
-    🔐 Grid coordinates encrypted in transit
-    🚀 Process multiple pages in one request
-    
-    Frontend must:
-    1. Encrypt batch fill data using shared key
-    2. Send encrypted_data string
-    3. Backend decrypts and processes all pages
-    
-    Encrypted data format:
-    {
-      "pages": [
-        {
-          "page_number": 1,
-          "text_data": [{"x": 10, "y": 20, "text": "...", ...}]
-        },
-        {
-          "page_number": 2,
-          "text_data": [{"x": 30, "y": 40, "text": "...", ...}]
-        }
-      ]
-    }
-    """
-    try:
-        # Decrypt the payload
-        decrypted = decrypt_data(request.encrypted_data)
-        
-        session_id = request.session_id
-        pages_data = decrypted["pages"]
-        
-        # Verify ownership
-        session = session_service.get_session(session_id)
-        if not session or session["user_id"] != current_user['id']:
-            raise HTTPException(status_code=403, detail="Unauthorized")
-        
-        # Restore session if needed
-        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
-        if not os.path.exists(session_temp_path):
-            if session["status"] == "completed":
-                pdf_processor.restore_session_from_storage(
-                    session_id,
-                    current_user['id'],
-                    session["storage_path"]
-                )
-                session_service.update_session_status(session_id, "processing")
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Session not found and cannot be restored"
-                )
-        
-        # Process each page
-        total_items_added = 0
-        pages_processed = []
-        
-        for page_data in pages_data:
-            page_number = page_data["page_number"]
-            text_data = page_data["text_data"]
-            
-            # Fill this page
-            pdf_processor.write_text_on_page(
-                session_id,
-                page_number,
-                text_data
-            )
-            
-            total_items_added += len(text_data)
-            pages_processed.append(page_number)
-            
-            print(f"✅ Filled page {page_number} with {len(text_data)} items")
-        
-        return BatchFillTextResponse(
-            session_id=session_id,
-            total_pages_filled=len(pages_processed),
-            total_items_added=total_items_added,
-            pages_processed=pages_processed
-        )
-    
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid encrypted data: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Batch fill text failed: {str(e)}")
+# ============================================================================
+# CLEANUP ON SHUTDOWN
+# ============================================================================
+
+def cleanup_executor():
+    """Cleanup executor on shutdown"""
+    print("🛑 Shutting down async executor...")
+    executor.shutdown(wait=True)
+    print("✅ Executor shut down cleanly")
+
+
+import atexit
+atexit.register(cleanup_executor)
