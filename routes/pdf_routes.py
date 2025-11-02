@@ -10,7 +10,8 @@ from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
     AddImageRequest, AddImageResponse, GeneratePDFResponse,
     SessionInfo, UserSessionsResponse, EncryptedGridResponse,
-    EncryptedFillTextRequest
+    EncryptedFillTextRequest, BatchFillTextRequest, EncryptedBatchFillTextRequest,
+    BatchFillTextResponse
 )
 from utils.encryption import encrypt_grid_data, decrypt_data
 from services.pdf_processor import PDFProcessor
@@ -923,3 +924,190 @@ async def get_available_fonts():
         "custom_fonts_support": True,
         "upload_endpoint": "POST /api/pdf/upload-font/{session_id}"
     }
+
+@router.post("/fill-text-batch", response_model=BatchFillTextResponse)
+async def fill_text_batch(
+    session_id: str,
+    request: BatchFillTextRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fill text on MULTIPLE pages at once
+    
+    🔒 PROTECTED - Can only modify your own PDFs
+    🚀 Process multiple pages in one request
+    
+    Args:
+        session_id: Session ID from upload
+        request: List of page fill requests
+        
+    Returns:
+        BatchFillTextResponse with summary of all pages processed
+        
+    Example request body:
+    {
+      "pages": [
+        {
+          "page_number": 1,
+          "text_data": [{"x": 10, "y": 20, "text": "Page 1 data", ...}]
+        },
+        {
+          "page_number": 2,
+          "text_data": [{"x": 30, "y": 40, "text": "Page 2 data", ...}]
+        }
+      ]
+    }
+    """
+    # Verify ownership
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # CHECK IF SESSION NEEDS RESTORATION
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        
+        if not os.path.exists(session_temp_path):
+            print(f"⚠️  Session {session_id} not in temp folder. Restoring from storage...")
+            
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+                session_service.update_session_status(session_id, "processing")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Session not found and cannot be restored (no original PDF)"
+                )
+        
+        # Process each page
+        total_items_added = 0
+        pages_processed = []
+        
+        for page_request in request.pages:
+            text_data = [item.dict() for item in page_request.text_data]
+            
+            # Fill this page
+            pdf_processor.write_text_on_page(
+                session_id,
+                page_request.page_number,
+                text_data
+            )
+            
+            total_items_added += len(text_data)
+            pages_processed.append(page_request.page_number)
+            
+            print(f"✅ Filled page {page_request.page_number} with {len(text_data)} items")
+        
+        return BatchFillTextResponse(
+            session_id=session_id,
+            total_pages_filled=len(pages_processed),
+            total_items_added=total_items_added,
+            pages_processed=pages_processed
+        )
+    
+    except Exception as e:
+        error_message = str(e)
+        if "No such file or directory" in error_message:
+            raise HTTPException(
+                status_code=400,
+                detail="It looks like the file or page you're trying to modify doesn't exist. "
+                       "Please make sure the PDF session and page numbers are valid."
+            )
+        else:
+            raise HTTPException(status_code=500, detail=f"Batch fill text failed: {error_message}")
+
+
+@router.post("/fill-text-batch-encrypted", response_model=BatchFillTextResponse)
+async def fill_text_batch_encrypted(
+    request: EncryptedBatchFillTextRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fill text on MULTIPLE pages at once (ENCRYPTED)
+    
+    🔒 PROTECTED
+    🔐 Grid coordinates encrypted in transit
+    🚀 Process multiple pages in one request
+    
+    Frontend must:
+    1. Encrypt batch fill data using shared key
+    2. Send encrypted_data string
+    3. Backend decrypts and processes all pages
+    
+    Encrypted data format:
+    {
+      "pages": [
+        {
+          "page_number": 1,
+          "text_data": [{"x": 10, "y": 20, "text": "...", ...}]
+        },
+        {
+          "page_number": 2,
+          "text_data": [{"x": 30, "y": 40, "text": "...", ...}]
+        }
+      ]
+    }
+    """
+    try:
+        # Decrypt the payload
+        decrypted = decrypt_data(request.encrypted_data)
+        
+        session_id = request.session_id
+        pages_data = decrypted["pages"]
+        
+        # Verify ownership
+        session = session_service.get_session(session_id)
+        if not session or session["user_id"] != current_user['id']:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        # Restore session if needed
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+                session_service.update_session_status(session_id, "processing")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Session not found and cannot be restored"
+                )
+        
+        # Process each page
+        total_items_added = 0
+        pages_processed = []
+        
+        for page_data in pages_data:
+            page_number = page_data["page_number"]
+            text_data = page_data["text_data"]
+            
+            # Fill this page
+            pdf_processor.write_text_on_page(
+                session_id,
+                page_number,
+                text_data
+            )
+            
+            total_items_added += len(text_data)
+            pages_processed.append(page_number)
+            
+            print(f"✅ Filled page {page_number} with {len(text_data)} items")
+        
+        return BatchFillTextResponse(
+            session_id=session_id,
+            total_pages_filled=len(pages_processed),
+            total_items_added=total_items_added,
+            pages_processed=pages_processed
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch fill text failed: {str(e)}")

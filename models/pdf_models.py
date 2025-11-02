@@ -73,6 +73,24 @@ class FillTextRequest(BaseModel):
     page_number: int
     text_data: List[TextItem]
 
+class BatchFillTextRequest(BaseModel):
+    """Batch fill text for multiple pages"""
+    pages: List[FillTextRequest]  # List of page fill requests
+
+
+class EncryptedBatchFillTextRequest(BaseModel):
+    """Encrypted batch fill text request"""
+    session_id: str
+    encrypted_data: str  # Encrypted JSON containing list of pages
+
+
+class BatchFillTextResponse(BaseModel):
+    """Response after batch filling"""
+    session_id: str
+    total_pages_filled: int
+    total_items_added: int
+    pages_processed: List[int]
+    success: bool = True
 
 # ============================================================================
 # IMAGE/SIGNATURE PLACEMENT MODELS
