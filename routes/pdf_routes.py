@@ -9,9 +9,10 @@ from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
     AddImageRequest, AddImageResponse, GeneratePDFResponse,
-    SessionInfo, UserSessionsResponse, EncryptedGridResponse
+    SessionInfo, UserSessionsResponse, EncryptedGridResponse,
+    EncryptedFillTextRequest
 )
-from utils.encryption import encrypt_grid_data
+from utils.encryption import encrypt_grid_data, decrypt_data
 from services.pdf_processor import PDFProcessor
 from services.session_service import SessionService
 from services.auth import get_current_user
@@ -218,6 +219,69 @@ async def fill_text(
             )
         else:
             raise HTTPException(status_code=500, detail=f"Fill text failed: {error_message}")
+        
+@router.post("/fill-text-encrypted", response_model=FillTextResponse)
+async def fill_text_encrypted(
+    request: EncryptedFillTextRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Fill text on PDF (encrypted - protects your API)
+    
+    🔒 PROTECTED
+    🔐 Grid coordinates encrypted in transit
+    
+    Frontend must:
+    1. Encrypt fill data using shared key
+    2. Send encrypted_data string
+    3. Backend decrypts and processes
+    """
+    try:
+        # Decrypt the payload
+        decrypted = decrypt_data(request.encrypted_data)
+        
+        session_id = request.session_id
+        page_number = decrypted["page_number"]
+        text_data = decrypted["text_data"]
+        
+        # Verify ownership
+        session = session_service.get_session(session_id)
+        if not session or session["user_id"] != current_user['id']:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        # Restore session if needed
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+                session_service.update_session_status(session_id, "processing")
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Session not found and cannot be restored"
+                )
+        
+        # Process the text
+        pdf_processor.write_text_on_page(
+            session_id,
+            page_number,
+            text_data
+        )
+        
+        return FillTextResponse(
+            page_number=page_number,
+            items_added=len(text_data)
+        )
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted data: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fill text failed: {str(e)}")
+
 
 @router.post("/add-image", response_model=AddImageResponse)
 async def add_image(
@@ -357,7 +421,7 @@ async def _add_image_helper(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Add {subfolder} failed: {str(e)}")
 
-   
+
 @router.post("/generate", response_model=GeneratePDFResponse)
 async def generate_pdf(
     session_id: str,
@@ -790,3 +854,72 @@ async def get_gridded_page(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Grid generation failed: {str(e)}")
+    
+@router.post("/upload-font/{session_id}")
+async def upload_custom_font(
+    session_id: str,
+    font_name: str = Form(...),
+    font_file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload custom font for session
+    
+    🔒 PROTECTED
+    🔤 Font available for this session only
+    """
+    # Verify ownership
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    # Validate file type
+    if not font_file.filename.lower().endswith('.ttf'):
+        raise HTTPException(status_code=400, detail="Only TTF fonts allowed")
+    
+    try:
+        # Restore session if needed
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+        
+        # Save font
+        fonts_folder = f"fonts"
+        os.makedirs(fonts_folder, exist_ok=True)
+        
+        font_path = f"{fonts_folder}/{font_name}.ttf"
+        
+        with open(font_path, "wb") as buffer:
+            shutil.copyfileobj(font_file.file, buffer)
+        
+        return {
+            "message": f"Font '{font_name}' uploaded successfully",
+            "font_name": font_name,
+            "usage": f"Set 'font': '{font_name}' in text_data"
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Font upload failed: {str(e)}")
+    
+@router.get("/available-fonts")
+async def get_available_fonts():
+    """
+    Get list of built-in fonts (auto-detected)
+    
+    ✅ PUBLIC
+    🔄 Auto-scans fonts/ directory
+    """
+    from services.pdf_processor import AVAILABLE_FONTS
+    
+    return {
+        "fonts": list(AVAILABLE_FONTS.keys()),
+        "total": len(AVAILABLE_FONTS),
+        "default": "arial" if "arial" in AVAILABLE_FONTS else list(AVAILABLE_FONTS.keys())[0] if AVAILABLE_FONTS else None,
+        "custom_fonts_support": True,
+        "upload_endpoint": "POST /api/pdf/upload-font/{session_id}"
+    }

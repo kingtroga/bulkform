@@ -56,3 +56,4 @@ htmlcov/
 
 # BulkForm
 temp_pdf_uploads/
+keep.txt

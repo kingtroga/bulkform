@@ -47,6 +47,7 @@ class TextItem(BaseModel):
     text: str
     size: int = 20
     align: str = "top"  # top, center, bottom
+    font: Optional[str] = "arial"
 
 
 class FillTextRequest(BaseModel):
@@ -61,6 +62,16 @@ class FillTextResponse(BaseModel):
     items_added: int
     success: bool = True
     message: str = "Text added successfully"
+
+class EncryptedFillTextRequest(BaseModel):
+    """Encrypted text fill request"""
+    session_id: str
+    encrypted_data: str  # Encrypted JSON containing page_number and text_data
+
+class FillTextRequest(BaseModel):
+    """Fill text request"""
+    page_number: int
+    text_data: List[TextItem]
 
 
 # ============================================================================
