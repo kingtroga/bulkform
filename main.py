@@ -10,7 +10,7 @@ import os
 import shutil
 
 # Configuration
-GRID_SIZE = 100
+GRID_SIZE = 150
 DPI = 300
 TEMP_FOLDER = "temp_pages"
 GRIDDED_FOLDER = "gridded_pages"
@@ -89,7 +89,7 @@ def display_image(image_path):
     img.show()
 
 def write_text_on_image(page_num, text_data):
-    """Write text on image at specified coordinates"""
+    """Write text on image at specified coordinates with alignment"""
     input_path = f"{TEMP_FOLDER}/page_{page_num}.png"
     output_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
     
@@ -106,20 +106,82 @@ def write_text_on_image(page_num, text_data):
         grid_y = item['y']
         text = item['text']
         font_size = item.get('size', 20)
+        alignment = item.get('align', 'top')  # default: text below the line
         
         pixel_x = int(grid_x * cell_width)
         pixel_y = int(grid_y * cell_height)
         
         try:
-            font = ImageFont.truetype("arial.ttf", font_size)
+            font = ImageFont.truetype("fonts/arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
         
-        draw.text((pixel_x, pixel_y), text, fill=(0, 0, 0), font=font)
-        print(f"  Wrote '{text}' at ({grid_x}, {grid_y})")
+        # Adjust Y position based on alignment
+        if alignment == 'bottom':
+            adjusted_y = pixel_y - font_size  # Text ABOVE the line
+        elif alignment == 'center':
+            adjusted_y = pixel_y - (font_size // 2)  # Text CENTERED on line
+        else:  # 'top' (default)
+            adjusted_y = pixel_y  # Text BELOW the line (original behavior)
+        
+        draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
+        print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [align: {alignment}]")
     
     img.save(output_path)
     print(f"Saved filled page: {output_path}")
+
+def add_images_to_page(page_num, image_data):
+    """
+    Add signature/stamp images to the page
+    
+    image_data format:
+    [
+        {
+            'x': 50, 'y': 100,
+            'image_path': 'signature.png',
+            'width': 200,  # Optional
+            'height': 50   # Optional
+        }
+    ]
+    """
+    # Check if page already has text filled
+    input_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
+    if not os.path.exists(input_path):
+        input_path = f"{TEMP_FOLDER}/page_{page_num}.png"
+    
+    output_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
+    
+    img = Image.open(input_path)
+    width, height = img.size
+    
+    cell_width = width / GRID_SIZE
+    cell_height = height / GRID_SIZE
+    
+    for item in image_data:
+        grid_x = item['x']
+        grid_y = item['y']
+        image_path = item['image_path']
+        
+        pixel_x = int(grid_x * cell_width)
+        pixel_y = int(grid_y * cell_height)
+        
+        # Load the image
+        overlay = Image.open(image_path)
+        
+        # Resize if dimensions provided
+        if 'width' in item and 'height' in item:
+            overlay = overlay.resize((item['width'], item['height']), Image.Resampling.LANCZOS)
+        
+        # Paste with transparency support
+        if overlay.mode == 'RGBA':
+            img.paste(overlay, (pixel_x, pixel_y), overlay)
+        else:
+            img.paste(overlay, (pixel_x, pixel_y))
+        
+        print(f"  Placed '{os.path.basename(image_path)}' at ({grid_x}, {grid_y})")
+    
+    img.save(output_path)
+    print(f"Saved page with images: {output_path}")
 
 def create_output_pdf(num_pages, single_page=None):
     """Create final PDF from filled pages"""
@@ -172,21 +234,22 @@ def main():
         print("="*60)
         print("1. View gridded page")
         print("2. Fill page with text")
-        print("3. Create output PDF (single page)")
-        print("4. Create output PDF (all pages)")
-        print("5. Exit")
+        print("3. Add signature/stamp image")
+        print("4. Create output PDF (single page)")
+        print("5. Create output PDF (all pages)")
+        print("6. Exit")
         
         choice = input("\nChoice: ").strip()
         
         if choice == "1":
-            # Step 4: Display gridded page
+            # View gridded page
             page = int(input(f"Page number (1-{num_pages}): "))
             gridded_path = f"{GRIDDED_FOLDER}/page_{page}_gridded.png"
             display_image(gridded_path)
             input("Press Enter after closing image...")
         
         elif choice == "2":
-            # Step 5 & 6: Fill page
+            # Fill page with text
             page = int(input(f"Page number (1-{num_pages}): "))
             
             text_data = []
@@ -198,23 +261,59 @@ def main():
                 x = int(input("  Grid X: "))
                 y = int(input("  Grid Y: "))
                 size = int(input("  Font size (default 20): ") or "20")
+                align = input("  Alignment (top/center/bottom, default top): ").strip() or "top"
                 
-                text_data.append({'x': x, 'y': y, 'text': text, 'size': size})
+                text_data.append({
+                    'x': x, 'y': y, 
+                    'text': text, 
+                    'size': size,
+                    'align': align
+                })
             
             if text_data:
                 write_text_on_image(page, text_data)
         
         elif choice == "3":
-            # Step 7: Single page PDF
+            # Add signature/stamp
+            page = int(input(f"Page number (1-{num_pages}): "))
+            
+            image_data = []
+            print("\nAdd images (empty path to finish):")
+            while True:
+                img_path = input("  Image path (PNG/JPG): ").strip()
+                if not img_path:
+                    break
+                
+                if not os.path.exists(img_path):
+                    print("  ⚠️  Image not found!")
+                    continue
+                
+                x = int(input("  Grid X: "))
+                y = int(input("  Grid Y: "))
+                resize = input("  Resize? (y/n, default n): ").lower()
+                
+                item = {'x': x, 'y': y, 'image_path': img_path}
+                
+                if resize == 'y':
+                    item['width'] = int(input("  Width (pixels): "))
+                    item['height'] = int(input("  Height (pixels): "))
+                
+                image_data.append(item)
+            
+            if image_data:
+                add_images_to_page(page, image_data)
+        
+        elif choice == "4":
+            # Single page PDF
             page = int(input(f"Page number (1-{num_pages}): "))
             create_output_pdf(num_pages, single_page=page)
         
-        elif choice == "4":
-            # Step 7: All pages PDF
+        elif choice == "5":
+            # All pages PDF
             create_output_pdf(num_pages)
         
-        elif choice == "5":
-            # Step 8: Exit
+        elif choice == "6":
+            # Exit
             cleanup = input("Delete temp folders? (y/n): ").lower()
             if cleanup == 'y':
                 cleanup_folders()
