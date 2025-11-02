@@ -9,8 +9,9 @@ from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
     AddImageRequest, AddImageResponse, GeneratePDFResponse,
-    SessionInfo, UserSessionsResponse
+    SessionInfo, UserSessionsResponse, EncryptedGridResponse
 )
+from utils.encryption import encrypt_grid_data
 from services.pdf_processor import PDFProcessor
 from services.session_service import SessionService
 from services.auth import get_current_user
@@ -93,6 +94,59 @@ async def upload_pdf(
         pdf_processor.cleanup_folders(session_id)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
+@router.post("/upload-encrypted", response_model=EncryptedGridResponse)
+async def upload_pdf_encrypted(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload PDF and return ENCRYPTED grid coordinates
+    
+    🔒 PROTECTED
+    🔐 Grid data encrypted to protect your idea
+    """
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files allowed")
+    
+    # Generate unique session ID
+    session_id = str(uuid.uuid4())
+    user_id = current_user['id']
+    
+    try:
+        # Save uploaded PDF temporarily
+        upload_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        os.makedirs(upload_path, exist_ok=True)
+        pdf_path = f"{upload_path}/original.pdf"
+        
+        with open(pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # 🔥 ALSO upload to Supabase Storage (permanent backup)
+        storage_path = pdf_processor.upload_original_pdf(pdf_path, user_id, session_id)
+        
+        # Convert to images and get dimensions
+        num_pages = pdf_processor.pdf_to_images(pdf_path, session_id)
+        
+        # Get grid data
+        page_dimensions = pdf_processor.get_all_page_dimensions(session_id, num_pages)
+        
+        # 🔥 ENCRYPT the grid data
+        encrypted_grid = encrypt_grid_data({
+            "pages": page_dimensions,
+            "dpi": pdf_processor.DPI
+        })
+        
+        return EncryptedGridResponse(
+            encrypted_data=encrypted_grid,
+            total_pages=num_pages,
+            session_id=session_id,
+            dpi=pdf_processor.DPI
+        )
+    
+    except Exception as e:
+        pdf_processor.cleanup_folders(session_id)
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 @router.post("/fill-text", response_model=FillTextResponse)
 async def fill_text(
