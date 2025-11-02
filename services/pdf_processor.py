@@ -6,9 +6,30 @@ from PIL import Image, ImageDraw, ImageFont
 from pdf2image import convert_from_path
 import img2pdf
 import os
+from pathlib import Path
 import shutil
 from typing import List, Dict
 from services.supabase_client import get_supabase
+
+
+def scan_available_fonts():
+    """
+    Auto-scan fonts directory and return available fonts
+    Looks for .ttf files in fonts/ directory
+    """
+    fonts = {}
+    fonts_dir = Path("fonts")
+    
+    if not fonts_dir.exists():
+        fonts_dir.mkdir(exist_ok=True)
+        print("⚠️  Created fonts/ directory. Add .ttf files here.")
+        return fonts
+    
+    for font_file in fonts_dir.glob("*.ttf"):
+        font_name = font_file.stem  # Filename without extension
+        fonts[font_name] = str(font_file)
+    
+    return fonts
 
 
 # Configuration
@@ -18,6 +39,13 @@ TEMP_FOLDER = "temp_pdf_uploads"
 GRIDDED_FOLDER = "gridded_pages"
 OUTPUT_FOLDER = "filled_pages"
 STORAGE_BUCKET = "pdfs"  # Supabase bucket name
+AVAILABLE_FONTS = scan_available_fonts()
+
+if not AVAILABLE_FONTS:
+    print("⚠️  No fonts found in fonts/ directory!")
+    print("📁 Add .ttf files to fonts/ folder")
+else:
+    print(f"✅ Loaded {len(AVAILABLE_FONTS)} fonts: {', '.join(AVAILABLE_FONTS.keys())}")
 
 
 class PDFProcessor:
@@ -109,16 +137,12 @@ class PDFProcessor:
         text_data: List[Dict]
     ):
         """
-        Write text on a PDF page with alignment support
+        Write text with font support from text_data
         
         Args:
-            session_id: Session identifier
-            page_num: Page number
-            text_data: List of text items [{"x": 10, "y": 20, "text": "...", "size": 30, "align": "top"}]
+            text_data: [{"x": 10, "y": 20, "text": "...", "size": 30, "align": "top", "font": "arial"}]
         """
         input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
-        
-        # Create output folder for session
         output_session = f"{self.OUTPUT_FOLDER}/{session_id}"
         os.makedirs(output_session, exist_ok=True)
         output_path = f"{output_session}/page_{page_num}_filled.png"
@@ -137,29 +161,56 @@ class PDFProcessor:
             text = item['text']
             font_size = item.get('size', 20)
             alignment = item.get('align', 'top')
+            font_name = item.get('font', 'arial')  # 🔥 Get font from each item!
             
             pixel_x = int(grid_x * cell_width)
             pixel_y = int(grid_y * cell_height)
             
-            try:
-                font = ImageFont.truetype("fonts/arial.ttf", font_size)
-            except:
-                font = ImageFont.load_default()
+            # Load font with priority order
+            font = self._load_font(session_id, font_name, font_size)
             
             # Adjust Y position based on alignment
             if alignment == 'bottom':
-                adjusted_y = pixel_y - font_size  # Text ABOVE the line
+                adjusted_y = pixel_y - font_size
             elif alignment == 'center':
-                adjusted_y = pixel_y - (font_size // 2)  # Text CENTERED on line
-            else:  # 'top'
-                adjusted_y = pixel_y  # Text BELOW the line
+                adjusted_y = pixel_y - (font_size // 2)
+            else:
+                adjusted_y = pixel_y
             
             draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
-            print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [align: {alignment}]")
+            print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [font: {font_name}, size: {font_size}, align: {alignment}]")
         
         img.save(output_path)
         print(f"Saved filled page: {output_path}")
-    
+
+
+    def _load_font(self, session_id: str, font_name: str, font_size: int):
+        """
+        Load font with fallback priority:
+        1. Custom uploaded font (session-specific)
+        2. Built-in available font
+        3. System default
+        """
+        try:
+            # Priority 1: Custom uploaded font
+            custom_font_path = f"fonts/{font_name}.ttf"
+            if os.path.exists(custom_font_path):
+                return ImageFont.truetype(custom_font_path, font_size)
+            
+            # Priority 2: Built-in font
+            if font_name in AVAILABLE_FONTS:
+                return ImageFont.truetype(AVAILABLE_FONTS[font_name], font_size)
+            
+            # Priority 3: Try as direct path
+            if os.path.exists(font_name):
+                return ImageFont.truetype(font_name, font_size)
+            
+            # Fallback: Default arial
+            return ImageFont.truetype(AVAILABLE_FONTS.get("arial", "fonts/arial.ttf"), font_size)
+        
+        except Exception as e:
+            print(f"⚠️  Font load failed: {e}. Using default.")
+            return ImageFont.load_default()
     def add_images_to_page(
         self,
         session_id: str,
@@ -374,3 +425,57 @@ class PDFProcessor:
         
         except Exception as e:
             raise Exception(f"Failed to restore session: {str(e)}")
+        
+    def apply_grid_to_page(self, session_id: str, page_num: int) -> str:
+        """
+        Apply grid overlay to a page image
+        
+        Args:
+            session_id: Session identifier
+            page_num: Page number
+            
+        Returns:
+            Path to gridded image
+        """
+        input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+        
+        # Create gridded folder for session
+        gridded_folder = f"{self.GRIDDED_FOLDER}/{session_id}"
+        os.makedirs(gridded_folder, exist_ok=True)
+        output_path = f"{gridded_folder}/page_{page_num}_gridded.png"
+        
+        img = Image.open(input_path)
+        width, height = img.size
+        
+        cell_width = width / self.GRID_SIZE
+        cell_height = height / self.GRID_SIZE
+        
+        draw = ImageDraw.Draw(img)
+        
+        # Draw grid lines
+        for i in range(self.GRID_SIZE + 1):
+            x = int(i * cell_width)
+            y = int(i * cell_height)
+            
+            line_width = 3 if i % 10 == 0 else 1
+            line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
+            
+            draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
+            draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
+        
+        # Add grid labels
+        try:
+            font_size = max(8, int(width / 150))
+            font = ImageFont.truetype("fonts/arial.ttf", font_size)
+        except:
+            font = ImageFont.load_default()
+        
+        for i in range(0, self.GRID_SIZE + 1, 10):  # Every 10 lines
+            x = int(i * cell_width)
+            y = int(i * cell_height)
+            draw.text((x + 2, 2), f"{i}", fill=(255, 0, 0), font=font)
+            draw.text((2, y + 2), f"{i}", fill=(0, 0, 255), font=font)
+        
+        img.save(output_path)
+        print(f"Applied grid to page {page_num}")
+        return output_path

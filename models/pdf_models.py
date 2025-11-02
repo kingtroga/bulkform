@@ -28,6 +28,13 @@ class GridResponse(BaseModel):
     session_id: str  # Session ID for subsequent operations
     success: bool = True
 
+class EncryptedGridResponse(BaseModel):
+    """Encrypted grid response for security"""
+    encrypted_data: str  # Encrypted grid coordinates
+    total_pages: int
+    session_id: str
+    dpi: int
+    success: bool = True
 
 # ============================================================================
 # TEXT PLACEMENT MODELS
@@ -40,6 +47,7 @@ class TextItem(BaseModel):
     text: str
     size: int = 20
     align: str = "top"  # top, center, bottom
+    font: Optional[str] = "arial"
 
 
 class FillTextRequest(BaseModel):
@@ -55,6 +63,34 @@ class FillTextResponse(BaseModel):
     success: bool = True
     message: str = "Text added successfully"
 
+class EncryptedFillTextRequest(BaseModel):
+    """Encrypted text fill request"""
+    session_id: str
+    encrypted_data: str  # Encrypted JSON containing page_number and text_data
+
+class FillTextRequest(BaseModel):
+    """Fill text request"""
+    page_number: int
+    text_data: List[TextItem]
+
+class BatchFillTextRequest(BaseModel):
+    """Batch fill text for multiple pages"""
+    pages: List[FillTextRequest]  # List of page fill requests
+
+
+class EncryptedBatchFillTextRequest(BaseModel):
+    """Encrypted batch fill text request"""
+    session_id: str
+    encrypted_data: str  # Encrypted JSON containing list of pages
+
+
+class BatchFillTextResponse(BaseModel):
+    """Response after batch filling"""
+    session_id: str
+    total_pages_filled: int
+    total_items_added: int
+    pages_processed: List[int]
+    success: bool = True
 
 # ============================================================================
 # IMAGE/SIGNATURE PLACEMENT MODELS
