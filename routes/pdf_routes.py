@@ -5,6 +5,7 @@ PDF Routes - Complete Form Filling API
 ☁️  Supabase Storage for PDFs
 """
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
     AddImageRequest, AddImageResponse, GeneratePDFResponse,
@@ -562,4 +563,76 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
         "failed": failed,
         "this_month": this_month,
         "success_rate": round((completed / total_pdfs * 100) if total_pdfs > 0 else 0, 2)
+    }
+
+@router.get("/preview/{session_id}/page/{page_number}")
+async def preview_page(
+    session_id: str,
+    page_number: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Preview a specific page (with or without edits)
+    
+    🔒 PROTECTED
+    📸 Returns the page image (filled or original)
+    
+    Use case:
+        See what your filled form looks like before generating final PDF
+    """
+    # Verify ownership
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Check if session needs restoration
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        if not os.path.exists(session_temp_path):
+            if session["status"] == "completed":
+                pdf_processor.restore_session_from_storage(
+                    session_id,
+                    current_user['id'],
+                    session["storage_path"]
+                )
+        
+        # Try filled page first, fall back to original
+        filled_path = f"{pdf_processor.OUTPUT_FOLDER}/{session_id}/page_{page_number}_filled.png"
+        original_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}/page_{page_number}.png"
+        
+        if os.path.exists(filled_path):
+            return FileResponse(filled_path, media_type="image/png")
+        elif os.path.exists(original_path):
+            return FileResponse(original_path, media_type="image/png")
+        else:
+            raise HTTPException(status_code=404, detail="Page not found")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+    
+@router.get("/preview/{session_id}/all-pages")
+async def preview_all_pages(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get URLs to preview all pages
+    
+    🔒 PROTECTED
+    📸 Returns list of preview URLs for each page
+    """
+    # Verify ownership
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    num_pages = session["num_pages"]
+    
+    return {
+        "session_id": session_id,
+        "total_pages": num_pages,
+        "preview_urls": [
+            f"/api/pdf/preview/{session_id}/page/{i}" 
+            for i in range(1, num_pages + 1)
+        ]
     }

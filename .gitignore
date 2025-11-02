@@ -53,3 +53,6 @@ output_*.pdf
 .pytest_cache/
 .coverage
 htmlcov/
+
+# BulkForm
+temp_pdf_uploads/
