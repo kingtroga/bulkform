@@ -219,7 +219,53 @@ async def fill_text(
         else:
             raise HTTPException(status_code=500, detail=f"Fill text failed: {error_message}")
 
+@router.post("/add-image", response_model=AddImageResponse)
+async def add_image(
+    session_id: str = Form(...),
+    page_number: int = Form(...),
+    x: int = Form(...),
+    y: int = Form(...),
+    width: Optional[int] = Form(None),
+    height: Optional[int] = Form(None),
+    image_file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Add generic image to PDF
+    
+    🔒 PROTECTED
+    🖼️ For logos, photos, etc.
+    """
+    return await _add_image_helper(
+        session_id, page_number, x, y, width, height, 
+        image_file, current_user, "images"
+    )
 
+
+@router.post("/add-stamp", response_model=AddImageResponse)
+async def add_stamp(
+    session_id: str = Form(...),
+    page_number: int = Form(...),
+    x: int = Form(...),
+    y: int = Form(...),
+    width: Optional[int] = Form(None),
+    height: Optional[int] = Form(None),
+    stamp_file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Add stamp to PDF
+    
+    🔒 PROTECTED
+    🏢 For company stamps, seals, etc.
+    """
+    return await _add_image_helper(
+        session_id, page_number, x, y, width, height, 
+        stamp_file, current_user, "stamps"
+    )
+
+
+# Keep existing add_signature endpoint but rename internally
 @router.post("/add-signature", response_model=AddImageResponse)
 async def add_signature(
     session_id: str = Form(...),
@@ -231,7 +277,30 @@ async def add_signature(
     signature_file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """Add signature - Auto-restores completed sessions"""
+    """
+    Add signature to PDF
+    
+    🔒 PROTECTED
+    ✍️ For personal signatures
+    """
+    return await _add_image_helper(
+        session_id, page_number, x, y, width, height, 
+        signature_file, current_user, "signatures"
+    )
+
+
+async def _add_image_helper(
+    session_id: str,
+    page_number: int,
+    x: int,
+    y: int,
+    width: Optional[int],
+    height: Optional[int],
+    image_file: UploadFile,
+    current_user: dict,
+    subfolder: str  # "images", "stamps", or "signatures"
+):
+    """Shared logic for adding images/stamps/signatures"""
     
     # Verify ownership
     session = session_service.get_session(session_id)
@@ -239,19 +308,16 @@ async def add_signature(
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     # Validate file type
-    if not signature_file.content_type in ["image/png", "image/jpeg", "image/jpg"]:
+    if not image_file.content_type in ["image/png", "image/jpeg", "image/jpg"]:
         raise HTTPException(
             status_code=400,
             detail="Only PNG and JPG images allowed"
         )
     
     try:
-        # 🔥 CHECK IF SESSION NEEDS RESTORATION
+        # Restore session if needed
         session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
-        
         if not os.path.exists(session_temp_path):
-            print(f"⚠️  Session {session_id} not in temp folder. Restoring from storage...")
-            
             if session["status"] == "completed":
                 pdf_processor.restore_session_from_storage(
                     session_id,
@@ -259,29 +325,24 @@ async def add_signature(
                     session["storage_path"]
                 )
                 session_service.update_session_status(session_id, "processing")
-            else:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Session not found and cannot be restored"
-                )
         
-        # Save signature
-        temp_signatures_folder = f"{pdf_processor.TEMP_FOLDER}/{session_id}/signatures"
-        os.makedirs(temp_signatures_folder, exist_ok=True)
+        # Save image to appropriate subfolder
+        images_folder = f"{pdf_processor.TEMP_FOLDER}/{session_id}/{subfolder}"
+        os.makedirs(images_folder, exist_ok=True)
         
-        signature_path = f"{temp_signatures_folder}/{signature_file.filename}"
+        image_path = f"{images_folder}/{image_file.filename}"
         
-        with open(signature_path, "wb") as buffer:
-            shutil.copyfileobj(signature_file.file, buffer)
+        with open(image_path, "wb") as buffer:
+            shutil.copyfileobj(image_file.file, buffer)
         
         # Prepare image data
-        image_data = [{'x': x, 'y': y, 'image_path': signature_path}]
+        image_data = [{'x': x, 'y': y, 'image_path': image_path}]
         
         if width and height:
             image_data[0]['width'] = width
             image_data[0]['height'] = height
         
-        # Add signature
+        # Add to page
         pdf_processor.add_images_to_page(
             session_id,
             page_number,
@@ -294,9 +355,9 @@ async def add_signature(
         )
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Add signature failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Add {subfolder} failed: {str(e)}")
 
-
+   
 @router.post("/generate", response_model=GeneratePDFResponse)
 async def generate_pdf(
     session_id: str,
