@@ -3,7 +3,7 @@ CSV Processor - Complete Test Suite
 Tests CSV parsing, Excel parsing, validation, normalization, and mapping
 """
 
-from ..services.csv_processor import get_csv_processor
+from services.csv_processor import get_csv_processor
 import csv
 import io
 from pathlib import Path
