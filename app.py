@@ -13,6 +13,7 @@ from routes.google_auth import router as google_auth_router
 from routes.user_routes import router as user_router
 from routes.pdf_routes import router as pdf_router
 from routes.profile import router as profile_router
+from routes.template_routes import router as template_router
 from dotenv import load_dotenv
 import secrets
 
@@ -83,6 +84,7 @@ app.include_router(google_auth_router)
 app.include_router(user_router)
 app.include_router(profile_router)
 app.include_router(pdf_router)
+app.include_router(template_router)
 
 
 # ============================================================================

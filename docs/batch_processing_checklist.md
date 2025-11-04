@@ -112,58 +112,38 @@
 ### Step 2.3: Batch Service ⏳ TODO
 **File:** `services/batch_service.py`
 
-- [ ] File created
-- [ ] `BatchService` class exists
-- [ ] Methods to implement:
-  - [ ] `create_batch(user_id, template_id, items)` → UUID
-  - [ ] `get_batch(batch_id, user_id)` → dict
-  - [ ] `list_batches(user_id)` → list[dict]
-  - [ ] `update_batch_status(batch_id, status)` → bool
-  - [ ] `process_batch(batch_id)` → bool
-  - [ ] `get_batch_progress(batch_id)` → dict
+- [x] File created
+- [x] `BatchService` class exists
+- [x] Methods to implement:
+  - [x] `create_batch(user_id, template_id, items)` → UUID
+  - [x] `get_batch(batch_id, user_id)` → dict
+  - [x] `list_batches(user_id)` → list[dict]
+  - [x] `update_batch_status(batch_id, status)` → bool
+  - [x] `process_batch(batch_id)` → bool
+  - [x] `get_batch_progress(batch_id)` → dict
 
 **How to verify:**
-- [ ] Can create batch jobs
-- [ ] Can track progress (completed/failed counts)
-- [ ] Can retrieve batch status
-- [ ] Handles failures gracefully
+- [x] Can create batch jobs
+- [x] Can track progress (completed/failed counts)
+- [x] Can retrieve batch status
+- [x] Handles failures gracefully
 
----
-
-### Step 2.4: PDF Service ⏳ TODO
-**File:** `services/pdf_service.py`
-
-- [ ] File created
-- [ ] `PDFService` class exists
-- [ ] Methods to implement:
-  - [ ] `fill_pdf(pdf_url, field_mappings, data)` → bytes
-  - [ ] `fill_pdf_batch(pdf_url, field_mappings, data_list)` → list[bytes]
-  - [ ] `upload_to_storage(pdf_bytes, filename)` → URL
-  - [ ] `merge_pdfs(pdf_list)` → bytes
-
-**How to verify:**
-- [ ] Can fill single PDF with data
-- [ ] Can batch fill multiple PDFs
-- [ ] Uploads work to Supabase Storage
-- [ ] Merged PDFs are valid
-
----
 
 ## Phase 3: API Routes ⏳ TODO
 
 ### Step 3.1: Template Routes
 **File:** `routes/template_routes.py`
 
-- [ ] File created
-- [ ] Endpoints implemented:
-  - [ ] `POST /templates` - Create template
-  - [ ] `GET /templates` - List templates
-  - [ ] `GET /templates/{id}` - Get template
-  - [ ] `PUT /templates/{id}` - Update template
-  - [ ] `DELETE /templates/{id}` - Delete template
-  - [ ] `GET /templates/official` - List official templates
-  - [ ] `GET /templates/official/{form_id}` - Get by form ID
-  - [ ] `POST /templates/official` - Create official (admin only)
+- [x] File created
+- [x] Endpoints implemented:
+  - [x] `POST /templates` - Create template
+  - [x] `GET /templates` - List templates
+  - [x] `GET /templates/{id}` - Get template
+  - [x] `PUT /templates/{id}` - Update template
+  - [x] `DELETE /templates/{id}` - Delete template
+  - [x] `GET /templates/official` - List official templates
+  - [x] `GET /templates/official/{form_id}` - Get by form ID
+  - [x] `POST /templates/official` - Create official (admin only)
 
 ### Step 3.2: Batch Routes
 **File:** `routes/batch_routes.py`
