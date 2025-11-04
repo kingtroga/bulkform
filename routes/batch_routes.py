@@ -21,6 +21,7 @@ import os
 import io
 import tempfile
 from pathlib import Path
+    
 
 from models.batch_models import (
     CreateBatchRequest,
@@ -37,6 +38,8 @@ from services.batch_service import get_batch_service
 from services.csv_processor import get_csv_processor
 from services.template_service import get_template_service
 from services.auth import get_current_user
+from services.pdf_processor import PDFProcessor
+from services.image_service import get_image_service
 
 router = APIRouter(prefix="/api/batch", tags=["Batch Processing"])
 
@@ -429,87 +432,99 @@ def fill_single_pdf_sync(
     batch_id: str,
     item_index: int
 ) -> str:
-    """
-    Fill a single PDF (SYNCHRONOUS)
-    
-    Steps:
-    1. Download template PDF from storage
-    2. Save to temp file
-    3. Convert to images
-    4. Fill text fields
-    5. Generate final PDF
-    6. Upload to storage
-    7. Cleanup temp files
-    8. Return download URL
-    
-    Returns:
-        Storage URL (signed) of generated PDF
-    """
-    from services.pdf_processor import PDFProcessor
-    
+    """Fill a single PDF with text AND images"""
     pdf_processor = PDFProcessor()
-    
-    # Create deterministic session ID
+    image_service = get_image_service()
     session_id = f"{batch_id}_{item_index}"
-    
     temp_pdf_path = None
+    temp_image_paths = []  # Track temp images for cleanup
     
     try:
-        # Step 1: Download template PDF from storage
+        # Steps 1-3: Download template, convert to images (same as before)
         storage_path = template['pdf_url']
-        print(f"  📥 Downloading template from: {storage_path}")
-        
         pdf_bytes = pdf_processor.supabase.storage.from_(
             pdf_processor.STORAGE_BUCKET
         ).download(storage_path)
         
-        # Step 2: Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', mode='wb') as tmp:
             tmp.write(pdf_bytes)
             temp_pdf_path = tmp.name
         
-        print(f"  💾 Saved to temp: {temp_pdf_path}")
-        
-        # Step 3: Convert PDF to images
-        print(f"  🖼️  Converting to images...")
         num_pages = pdf_processor.pdf_to_images(temp_pdf_path, session_id)
-        print(f"  ✅ Converted {num_pages} pages")
         
-        # Step 4: Build text data from template mappings
+        # Step 4: Build text data AND image data
         field_mappings = template['field_mappings']
+        pages_data = {}      # Text fields
+        images_data = {}     # Image fields  ← NEW!
         
-        # Group fields by page
-        pages_data = {}
         for field_name, field_config in field_mappings.items():
             page = field_config.get('page', 1)
+            field_type = field_config.get('type', 'text')
             
+            # Handle IMAGE fields  ← NEW!
+            if field_type in ['image', 'signature', 'stamp']:
+                image_ref = client_data.get(field_name, '')
+                
+                if image_ref and image_ref.strip():
+                    # Resolve image reference to file path
+                    try:
+                        # Check if local file
+                        if os.path.exists(image_ref):
+                            image_path = image_ref
+                        else:
+                            # Download from database (by ID or name)
+                            image_bytes = image_service.download_image_bytes(
+                                image_ref, user_id
+                            )
+                            
+                            if image_bytes:
+                                # Save to temp file
+                                with tempfile.NamedTemporaryFile(
+                                    delete=False, suffix='.png'
+                                ) as tmp_img:
+                                    tmp_img.write(image_bytes)
+                                    image_path = tmp_img.name
+                                
+                                temp_image_paths.append(image_path)
+                                print(f"  📥 Downloaded image: {image_ref}")
+                            else:
+                                print(f"  ⚠️  Image not found: {image_ref}")
+                                continue
+                        
+                        # Add to images_data
+                        if page not in images_data:
+                            images_data[page] = []
+                        
+                        images_data[page].append({
+                            'image_path': image_path,
+                            'x': field_config['x'],
+                            'y': field_config['y'],
+                            'width': field_config.get('width', 200),
+                            'height': field_config.get('height', 60)
+                        })
+                    
+                    except Exception as e:
+                        print(f"  ❌ Failed to load image {image_ref}: {str(e)}")
+                
+                continue  # Don't add to text fields
+            
+            # Handle TEXT fields (same as before)
             if page not in pages_data:
                 pages_data[page] = []
             
-            # Get field type
-            field_type = field_config.get('type', 'text')
-            
-            # Skip non-text fields for now (TODO: implement)
-            if field_type in ['image', 'signature', 'stamp']:
-                print(f"  ⏭️  Skipping {field_type} field: {field_name}")
-                continue
-            
-            # Get value from client data
             value = client_data.get(field_name, '')
             
-            # Handle checkbox type
+            # Checkbox handling
             if field_type == 'checkbox':
-                # Handle boolean or truthy values
                 if isinstance(value, bool):
                     value = field_config.get('text', '●') if value else ''
                 elif value in ['true', 'True', '1', 'yes', 'Yes', 'TRUE', 'YES']:
                     value = field_config.get('text', '●')
-                elif value and str(value).strip():  # Any non-empty value (including '●')
+                elif value and str(value).strip():
                     value = field_config.get('text', '●')
                 else:
                     value = ''
             
-            # Convert to string
             value = str(value) if value is not None else ''
             
             pages_data[page].append({
@@ -521,14 +536,21 @@ def fill_single_pdf_sync(
                 'align': field_config.get('align', 'left')
             })
         
-        # Step 5: Fill text on each page
-        print(f"  ✍️  Filling text fields...")
+        # Step 5: Fill text fields
+        print(f"  ✍️  Filling {sum(len(t) for t in pages_data.values())} text field(s)...")
         for page_num, text_data in pages_data.items():
             if text_data:
                 pdf_processor.write_text_on_page(session_id, page_num, text_data)
         
+        # Step 5.5: Fill image fields  ← NEW!
+        if images_data:
+            total_images = sum(len(imgs) for imgs in images_data.values())
+            print(f"  🖼️  Filling {total_images} image field(s)...")
+            for page_num, image_list in images_data.items():
+                if image_list:
+                    pdf_processor.add_images_to_page(session_id, page_num, image_list)
+        
         # Step 6: Generate final PDF
-        print(f"  📄 Generating final PDF...")
         result = pdf_processor.create_pdf_with_upload(
             session_id=session_id,
             user_id=user_id,
@@ -537,20 +559,21 @@ def fill_single_pdf_sync(
         )
         
         storage_url = result['storage_url']
-        print(f"  ✅ PDF generated: {storage_url}")
         
-        # Step 7: Cleanup temp files
-        print(f"  🧹 Cleaning up...")
+        # Step 7: Cleanup
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.unlink(temp_pdf_path)
+        
+        # Cleanup temp images  ← NEW!
+        for img_path in temp_image_paths:
+            if os.path.exists(img_path):
+                os.unlink(img_path)
         
         pdf_processor.cleanup_folders(session_id)
         
         return storage_url
     
     except Exception as e:
-        print(f"  ❌ PDF filling failed: {str(e)}")
-        
         # Cleanup on error
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             try:
@@ -558,12 +581,21 @@ def fill_single_pdf_sync(
             except:
                 pass
         
+        # Cleanup temp images
+        for img_path in temp_image_paths:
+            if os.path.exists(img_path):
+                try:
+                    os.unlink(img_path)
+                except:
+                    pass
+        
         try:
             pdf_processor.cleanup_folders(session_id)
         except:
             pass
         
         raise Exception(f"PDF generation failed: {str(e)}")
+
 
 # ============================================================================
 # HEALTH CHECK

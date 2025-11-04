@@ -15,6 +15,7 @@ from routes.pdf_routes import router as pdf_router
 from routes.profile import router as profile_router
 from routes.template_routes import router as template_router
 from routes.batch_routes import router as batch_router
+from routes.image_routes import router as image_router
 from dotenv import load_dotenv
 import secrets
 
@@ -87,6 +88,7 @@ app.include_router(profile_router)
 app.include_router(pdf_router)
 app.include_router(template_router)
 app.include_router(batch_router)
+app.include_router(image_router)
 
 # ============================================================================
 # PROTECTED DOCS ENDPOINTS (Production Only)
