@@ -307,6 +307,7 @@ class BatchService:
         item_id: str,
         status: str,
         pdf_url: Optional[str] = None,
+        storage_path: Optional[str] = None,  # ← ADD THIS
         error_message: Optional[str] = None
     ) -> bool:
         """
@@ -314,18 +315,19 @@ class BatchService:
         
         Args:
             item_id: UUID of batch item
-            status: New status ('pending', 'processing', 'completed', 'failed')
-            pdf_url: Download URL for generated PDF
+            status: New status
+            pdf_url: Download URL (expires in 1 hour)
+            storage_path: Storage path (permanent) ← NEW!
             error_message: Error message if failed
-            
-        Returns:
-            True if successful
         """
         try:
             updates = {"status": status}
             
             if pdf_url:
                 updates["pdf_url"] = pdf_url
+            
+            if storage_path:  # ← ADD THIS
+                updates["storage_path"] = storage_path
             
             if error_message:
                 updates["error_message"] = error_message
