@@ -59,3 +59,7 @@ temp_pdf_uploads/
 keep.txt
 test_data/
 signature.png
+test_batch_endpoints.py
+test_batch_service.py
+test_guarantors.csv
+t4-2b_experiment.pdf

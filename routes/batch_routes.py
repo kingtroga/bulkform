@@ -14,13 +14,15 @@ All critical issues from analysis document have been fixed:
 """
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query, BackgroundTasks
-from typing import Optional
+from typing import Optional, List, Dict
 import asyncio
 import uuid
 import os
 import io
 import tempfile
 from pathlib import Path
+import httpx
+import zipfile
     
 
 from models.batch_models import (
@@ -109,6 +111,185 @@ def validate_batch_size(items: list) -> None:
             status_code=400,
             detail="Batch cannot be empty"
         )
+    
+
+async def create_batch_zip(
+    batch_id: str,
+    batch_name: str,
+    pdf_items: List[Dict],
+    user_id: str
+) -> str:
+    """Create zip file with all PDFs - FIXED VERSION"""  
+    pdf_processor = PDFProcessor()
+    
+    # Create temp zip file
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
+        zip_path = tmp_zip.name
+    
+    print(f"📦 Creating zip at: {zip_path}")
+    print(f"📦 Total PDFs to add: {len(pdf_items)}")
+    
+    try:
+        # Create zip and add PDFs
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                
+                for idx, item in enumerate(pdf_items, 1):
+                    pdf_url = item.get('pdf_url')
+                    storage_path = item.get('storage_path')  # ← allow storage_path as alternative
+
+                    if not pdf_url and not storage_path:
+                        print(f"  ⚠️  Item {idx}: No PDF URL or storage path")
+                        continue
+                    
+                    try:
+                        # Generate filename
+                        client_data = item.get('client_data', {})
+                        filename = generate_pdf_filename(client_data, item['item_index'])
+                        
+                        pdf_bytes = b""
+
+                        # Prefer storage_path (avoids expired signed URLs)
+                        if storage_path:
+                            print(f"  📥 [{idx}/{len(pdf_items)}] Downloading via storage_path: {filename}")
+                            print(f"      PATH: {storage_path}")
+                            pdf_bytes = pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).download(storage_path)
+
+                        # If no storage_path bytes (or not provided), try signed URL
+                        if (not pdf_bytes) and pdf_url:
+                            try:
+                                print(f"  📥 [{idx}/{len(pdf_items)}] Downloading via URL: {filename}")
+                                print(f"      URL: {pdf_url[:80]}...")
+                                response = await client.get(pdf_url)
+                                response.raise_for_status()
+                                pdf_bytes = response.content
+                            except httpx.HTTPStatusError as http_err:
+                                # Fallback: signed URL likely expired ("InvalidJWT"). If we have storage_path, try direct download.
+                                print(f"  ⚠️  [{idx}/{len(pdf_items)}] URL fetch failed ({http_err.response.status_code}). Trying storage fallback...")
+                                if storage_path:
+                                    pdf_bytes = pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).download(storage_path)
+                                else:
+                                    raise
+
+                        if not pdf_bytes or len(pdf_bytes) == 0:
+                            print(f"  ❌ [{idx}/{len(pdf_items)}] Empty PDF content!")
+                            continue
+                        
+                        print(f"  ✅ [{idx}/{len(pdf_items)}] Downloaded {len(pdf_bytes)} bytes")
+                        
+                        # Add to zip
+                        zipf.writestr(filename, pdf_bytes)
+                        print(f"  ✅ [{idx}/{len(pdf_items)}] Added to zip: {filename}")
+                        
+                    except Exception as e:
+                        print(f"  ❌ [{idx}/{len(pdf_items)}] Failed: {str(e)}")
+                        continue
+        
+        # Verify zip has content
+        zip_size = os.path.getsize(zip_path)
+        print(f"📦 Zip file size: {zip_size} bytes")
+        
+        if zip_size < 100:  # Zip with no files is ~22 bytes
+            raise Exception("Zip file is empty! No PDFs were added.")
+        
+        # Verify zip contents
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            file_count = len(zipf.namelist())
+            print(f"📦 Zip contains {file_count} file(s)")
+            if file_count == 0:
+                raise Exception("Zip created but contains no files!")
+        
+        # Upload zip to storage
+        print(f"📤 Uploading zip to storage...")
+        zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
+        
+        with open(zip_path, 'rb') as f:
+            zip_data = f.read()
+            print(f"📤 Uploading {len(zip_data)} bytes...")
+            
+            pdf_processor.supabase.storage.from_(
+                pdf_processor.STORAGE_BUCKET
+            ).upload(
+                path=zip_storage_path,
+                file=zip_data,
+                file_options={"content-type": "application/zip", "upsert": "true"}
+            )
+        
+        # Generate signed URL
+        signed_url_response = pdf_processor.supabase.storage.from_(
+            pdf_processor.STORAGE_BUCKET
+        ).create_signed_url(zip_storage_path, 3600)
+        
+        zip_url = signed_url_response['signedURL']
+        
+        print(f"✅ Zip created successfully!")
+        print(f"✅ URL: {zip_url[:80]}...")
+        
+        return zip_url
+    
+    except Exception as e:
+        print(f"❌ Zip creation failed: {str(e)}")
+        raise
+    
+    finally:
+        # Cleanup temp file
+        if os.path.exists(zip_path):
+            print(f"🧹 Cleaning up temp file: {zip_path}")
+            os.unlink(zip_path)
+
+
+def clean_filename(text: str) -> str:
+    """Clean text for use in filename"""
+    if not text:
+        return ""
+
+    # Remove or replace special characters
+    cleaned = ''.join(c if c.isalnum() or c in ' -_' else '_' for c in str(text))
+
+    # Replace spaces with underscores
+    cleaned = cleaned.replace(' ', '_')
+
+    # Collapse multiple underscores into one
+    cleaned = '_'.join(filter(None, cleaned.split('_')))
+
+    # Trim excessively long names
+    return cleaned[:50] if cleaned else ""
+
+
+def generate_pdf_filename(client_data: Dict, item_index: int) -> str:
+    """Generate friendly filename from client data"""
+    # Try different name combinations
+    if 'last_name' in client_data and 'first_name' in client_data:
+        last = clean_filename(str(client_data['last_name']))
+        first = clean_filename(str(client_data['first_name']))
+        if last and first:
+            return f"{last}_{first}.pdf"
+    
+    if 'full_name' in client_data:
+        name = clean_filename(str(client_data['full_name']))
+        if name:
+            return f"{name}.pdf"
+    
+    if 'name' in client_data:
+        name = clean_filename(str(client_data['name']))
+        if name:
+            return f"{name}.pdf"
+    
+    # Fallback to index-based name
+    return f"document_{item_index + 1}.pdf"
+
+
+async def download_pdf_bytes(url: str) -> bytes:
+    """Download PDF from URL or storage path"""
+    # If it's an HTTP(S) URL, fetch over network
+    if url.lower().startswith(("http://", "https://")):
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+    # Otherwise, treat as Supabase storage path in the configured bucket
+    pdf_processor = PDFProcessor()
+    return pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).download(url)
 
 
 # ============================================================================
@@ -383,7 +564,7 @@ def process_batch_sync(batch_id: str, user_id: str, template_id: str):
                 services['batch'].update_batch_item(item['id'], "processing")
                 
                 # Fill PDF using helper function
-                pdf_url = fill_single_pdf_sync(
+                result = fill_single_pdf_sync(
                     template=template,
                     client_data=item['client_data'],
                     user_id=user_id,
@@ -395,12 +576,13 @@ def process_batch_sync(batch_id: str, user_id: str, template_id: str):
                 services['batch'].update_batch_item(
                     item['id'],
                     "completed",
-                    pdf_url=pdf_url
+                    pdf_url=result['storage_url'],
+                    storage_path=result['storage_path']
                 )
                 
                 services['batch'].increment_batch_counters(batch_id, completed=1)
                 
-                print(f"✅ Item {item['item_index']} completed: {pdf_url}")
+                print(f"✅ Item {item['item_index']} completed: {result['storage_url']}")
             
             except Exception as e:
                 error_msg = str(e)
@@ -559,6 +741,12 @@ def fill_single_pdf_sync(
         )
         
         storage_url = result['storage_url']
+        storage_path = result['storage_path'] 
+
+        print(f"  ✅ PDF generated")
+        print(f"     URL: {storage_url[:50]}...")
+        print(f"     Path: {storage_path}")
+        
         
         # Step 7: Cleanup
         if temp_pdf_path and os.path.exists(temp_pdf_path):
@@ -571,7 +759,10 @@ def fill_single_pdf_sync(
         
         pdf_processor.cleanup_folders(session_id)
         
-        return storage_url
+        return {
+            'storage_url': storage_url,
+            'storage_path': storage_path
+        }
     
     except Exception as e:
         # Cleanup on error
@@ -766,37 +957,89 @@ async def get_batch_items(
 @router.get("/{batch_id}/download", response_model=BatchDownloadResponse)
 async def download_batch(
     batch_id: str,
+    create_zip: bool = Query(default=False),
     current_user: dict = Depends(get_current_user)
 ):
-    """
-    Get download URLs for all completed PDFs
-    
-    🔒 Requires authentication
-    
-    Returns list of signed download URLs for each completed PDF in the batch.
-    URLs are valid for 1 hour.
-    """
     try:
         services = get_services()
         
-        # Get batch
         batch = services['batch'].get_batch(batch_id, current_user['id'])
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
         
-        # Get completed items
         completed_items = services['batch'].get_batch_items(batch_id, status="completed")
+
+        pdf_processor = PDFProcessor()
+
+        # --- refresh/ensure a valid signed URL for each item ---
+        from urllib.parse import urlparse
+        bucket = pdf_processor.STORAGE_BUCKET
+
+        def _extract_storage_path_from_signed(url: str) -> Optional[str]:
+            try:
+                p = urlparse(url)
+                # expected: /storage/v1/object/sign/<bucket>/<path/to/file>
+                marker = f"/storage/v1/object/sign/{bucket}/"
+                if marker in p.path:
+                    return p.path.split(marker, 1)[1]
+            except Exception:
+                pass
+            return None
         
-        # Build download URLs (they're already signed from storage)
+        for item in completed_items:
+            storage_path = item.get("storage_path")
+            signed = item.get("pdf_url")
+
+            # If we don't have storage_path but we do have a (possibly expired) signed URL, try to derive it.
+            if not storage_path and signed:
+                derived = _extract_storage_path_from_signed(signed)
+                if derived:
+                    item["storage_path"] = derived
+                    storage_path = derived
+
+            # Always (re)create a fresh signed URL if we have a storage_path
+            if storage_path:
+                try:
+                    print(f"  🔄 Regenerating URL for item {item['item_index']}")
+                    signed_url_response = pdf_processor.supabase.storage.from_(bucket).create_signed_url(
+                        storage_path, 3600
+                    )
+                    item["pdf_url"] = signed_url_response["signedURL"]
+                    print(f"  ✅ URL regenerated")
+                except Exception as e:
+                    print(f"  ⚠️  Could not regenerate URL for item {item['item_index']}: {e}")
+            else:
+                # No storage_path and cannot derive; leave existing pdf_url as-is (may still work)
+                pass
+
+        # ✅ Keep 'url' for response model while also providing 'pdf_url'/'storage_path' for zipping
         pdf_urls = [
             {
-                "item_index": item['item_index'],
-                "url": item['pdf_url'],
-                "client_data": item['client_data']
+                "item_index": item["item_index"],
+                "url": item.get("pdf_url"),                # required by BatchDownloadResponse
+                "pdf_url": item.get("pdf_url"),            # used by create_batch_zip (if present)
+                "storage_path": item.get("storage_path"),  # fallback used by create_batch_zip
+                "client_data": item["client_data"]
             }
             for item in completed_items
-            if item.get('pdf_url')
+            if item.get("pdf_url") or item.get("storage_path")
         ]
+        
+        # Create zip if requested
+        zip_url = None
+        if create_zip and pdf_urls:
+            print(f"\\n{'='*80}")
+            print(f"Creating zip for batch: {batch_id}")
+            print(f"User: {current_user['id']}")
+            print(f"PDFs to zip: {len(pdf_urls)}")
+            print(f"{'='*80}\\n")
+            
+            zip_url = await create_batch_zip(
+                batch_id=batch_id,
+                batch_name=batch['batch_name'],
+                pdf_items=pdf_urls,  # contains pdf_url/storage_path for downloader
+                user_id=current_user['id']
+            )
         
         return BatchDownloadResponse(
             batch_id=batch_id,
@@ -804,16 +1047,20 @@ async def download_batch(
             total_pdfs=batch['total_items'],
             completed=batch['completed'],
             failed=batch['failed'],
-            pdf_urls=pdf_urls,
-            zip_available=False,  # TODO: Implement zip creation
-            zip_url=None
+            pdf_urls=pdf_urls,       # still has the 'url' field required by the response model
+            zip_available=True,
+            zip_url=zip_url
         )
     
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Failed to get download URLs: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get download URLs: {str(e)}")
+        print(f"❌ Download failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 # ============================================================================
