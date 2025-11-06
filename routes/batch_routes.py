@@ -606,7 +606,6 @@ def process_batch_sync(batch_id: str, user_id: str, template_id: str):
         except:
             print(f"❌ Could not update batch status to failed")
 
-
 def fill_single_pdf_sync(
     template: dict,
     client_data: dict,
@@ -614,90 +613,133 @@ def fill_single_pdf_sync(
     batch_id: str,
     item_index: int
 ) -> str:
-    """Fill a single PDF with text AND images"""
+    """Fill a single PDF with text AND images — with verbose logs"""
+    print("\n" + "=" * 80)
+    print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index} user_id={user_id}")
     pdf_processor = PDFProcessor()
     image_service = get_image_service()
     session_id = f"{batch_id}_{item_index}"
     temp_pdf_path = None
     temp_image_paths = []  # Track temp images for cleanup
-    
+
+    # Snapshot template summary (avoid dumping entire dict)
     try:
-        # Steps 1-3: Download template, convert to images (same as before)
+        fm = template.get("field_mappings", {})
+        print(f"🧾 Template summary:"
+              f"\n  - id: {template.get('id')}"
+              f"\n  - name: {template.get('name')}"
+              f"\n  - is_official: {template.get('is_official')}"
+              f"\n  - pdf_url (storage path): {template.get('pdf_url')}"
+              f"\n  - field_mappings keys: {list(fm.keys())[:10]} (total={len(fm)})")
+    except Exception as _e:
+        print(f"⚠️  Failed to log template summary: {_e}")
+
+    # Snapshot client data keys only (to avoid huge dumps)
+    try:
+        print(f"👤 Client data keys (first 20): {list(client_data.keys())[:20]}")
+    except Exception as _e:
+        print(f"⚠️  Failed to log client data keys: {_e}")
+
+    try:
+        # Steps 1-3: Download template, convert to images
         storage_path = template['pdf_url']
-        pdf_bytes = pdf_processor.supabase.storage.from_(
-            pdf_processor.STORAGE_BUCKET
-        ).download(storage_path)
-        
+        print(f"📦 Storage bucket: {pdf_processor.STORAGE_BUCKET}")
+        print(f"📥 Attempting to download template PDF:")
+        print(f"    - path: {storage_path}")
+
+        try:
+            pdf_bytes = pdf_processor.supabase.storage.from_(
+                pdf_processor.STORAGE_BUCKET
+            ).download(storage_path)
+            print(f"✅ Downloaded template bytes: {len(pdf_bytes)}")
+        except Exception as dl_err:
+            print(f"❌ Download failed from primary bucket '{pdf_processor.STORAGE_BUCKET}': {dl_err}")
+            # If you configured a fallback bucket on PDFProcessor, try it
+            fb = getattr(pdf_processor, "FALLBACK_STORAGE_BUCKET", None)
+            if fb:
+                print(f"🔁 Trying fallback bucket: {fb}")
+                try:
+                    pdf_bytes = pdf_processor.supabase.storage.from_(fb).download(storage_path)
+                    print(f"✅ Downloaded from fallback bucket '{fb}': {len(pdf_bytes)} bytes")
+                except Exception as fb_err:
+                    print(f"❌ Fallback download also failed: {fb_err}")
+                    raise
+            else:
+                raise
+
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', mode='wb') as tmp:
             tmp.write(pdf_bytes)
             temp_pdf_path = tmp.name
-        
+        print(f"📄 Temp PDF path: {temp_pdf_path}")
+
+        print(f"🖼️ Converting PDF to images for session: {session_id}")
         num_pages = pdf_processor.pdf_to_images(temp_pdf_path, session_id)
-        
+        print(f"🖨️  Conversion done. Pages: {num_pages}")
+
         # Step 4: Build text data AND image data
         field_mappings = template['field_mappings']
         pages_data = {}      # Text fields
-        images_data = {}     # Image fields  ← NEW!
-        
+        images_data = {}     # Image fields
+
+        # Pre-counts for logs
+        text_field_count = 0
+        image_field_count = 0
+
+        print(f"🧭 Iterating field_mappings...")
         for field_name, field_config in field_mappings.items():
             page = field_config.get('page', 1)
             field_type = field_config.get('type', 'text')
-            
-            # Handle IMAGE fields  ← NEW!
+            print(f"   • Field '{field_name}' → page={page} type={field_type}")
+
+            # IMAGE/signature/stamp fields
             if field_type in ['image', 'signature', 'stamp']:
                 image_ref = client_data.get(field_name, '')
-                
-                if image_ref and image_ref.strip():
-                    # Resolve image reference to file path
+                print(f"     - image_ref: {repr(image_ref)[:120]}")
+                if image_ref and str(image_ref).strip():
                     try:
-                        # Check if local file
                         if os.path.exists(image_ref):
                             image_path = image_ref
+                            print(f"     - Local image found: {image_path}")
                         else:
-                            # Download from database (by ID or name)
-                            image_bytes = image_service.download_image_bytes(
-                                image_ref, user_id
-                            )
-                            
+                            print(f"     - Downloading image bytes via image_service for ref='{image_ref}'")
+                            image_bytes = image_service.download_image_bytes(image_ref, user_id)
                             if image_bytes:
-                                # Save to temp file
-                                with tempfile.NamedTemporaryFile(
-                                    delete=False, suffix='.png'
-                                ) as tmp_img:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_img:
                                     tmp_img.write(image_bytes)
                                     image_path = tmp_img.name
-                                
                                 temp_image_paths.append(image_path)
-                                print(f"  📥 Downloaded image: {image_ref}")
+                                print(f"     - Image saved to temp: {image_path} (bytes={len(image_bytes)})")
                             else:
-                                print(f"  ⚠️  Image not found: {image_ref}")
+                                print(f"     ⚠️  No image bytes returned for ref='{image_ref}'")
                                 continue
-                        
-                        # Add to images_data
+
                         if page not in images_data:
                             images_data[page] = []
-                        
-                        images_data[page].append({
+                        entry = {
                             'image_path': image_path,
                             'x': field_config['x'],
                             'y': field_config['y'],
                             'width': field_config.get('width', 200),
                             'height': field_config.get('height', 60)
-                        })
-                    
+                        }
+                        images_data[page].append(entry)
+                        image_field_count += 1
+                        print(f"     - Queued image placement: {entry}")
                     except Exception as e:
-                        print(f"  ❌ Failed to load image {image_ref}: {str(e)}")
-                
-                continue  # Don't add to text fields
-            
-            # Handle TEXT fields (same as before)
+                        print(f"     ❌ Failed to load/place image '{image_ref}': {e}")
+                else:
+                    print(f"     - No image provided in client_data for '{field_name}'")
+                continue  # skip to next field (don’t add as text)
+
+            # TEXT / CHECKBOX fields
             if page not in pages_data:
                 pages_data[page] = []
-            
+
             value = client_data.get(field_name, '')
-            
-            # Checkbox handling
+
+            # Checkbox handling with logs
             if field_type == 'checkbox':
+                original = value
                 if isinstance(value, bool):
                     value = field_config.get('text', '●') if value else ''
                 elif value in ['true', 'True', '1', 'yes', 'Yes', 'TRUE', 'YES']:
@@ -706,87 +748,120 @@ def fill_single_pdf_sync(
                     value = field_config.get('text', '●')
                 else:
                     value = ''
-            
+                print(f"     - Checkbox normalized: {repr(original)} → {repr(value)}")
+
             value = str(value) if value is not None else ''
-            
-            pages_data[page].append({
+            entry = {
                 'text': value,
                 'x': field_config['x'],
                 'y': field_config['y'],
                 'size': field_config.get('size', 12),
                 'font': field_config.get('font', 'arial'),
                 'align': field_config.get('align', 'left')
-            })
-        
+            }
+            pages_data[page].append(entry)
+            text_field_count += 1
+            if len(value) > 80:
+                log_val = value[:77] + "..."
+            else:
+                log_val = value
+            print(f"     - Queued text: {log_val!r} at (x={entry['x']}, y={entry['y']}) page={page}")
+
         # Step 5: Fill text fields
-        print(f"  ✍️  Filling {sum(len(t) for t in pages_data.values())} text field(s)...")
+        total_text_items = sum(len(t) for t in pages_data.values())
+        print(f"✍️  Writing text fields: pages={sorted(pages_data.keys())}, total_text_items={total_text_items}, counted={text_field_count}")
         for page_num, text_data in pages_data.items():
             if text_data:
+                print(f"   → Page {page_num}: {len(text_data)} item(s)")
                 pdf_processor.write_text_on_page(session_id, page_num, text_data)
-        
-        # Step 5.5: Fill image fields  ← NEW!
+
+        # Step 5.5: Fill image fields
         if images_data:
             total_images = sum(len(imgs) for imgs in images_data.values())
-            print(f"  🖼️  Filling {total_images} image field(s)...")
+            print(f"🖼️  Placing images: pages={sorted(images_data.keys())}, total_images={total_images}, counted={image_field_count}")
             for page_num, image_list in images_data.items():
                 if image_list:
+                    print(f"   → Page {page_num}: {len(image_list)} image(s)")
                     pdf_processor.add_images_to_page(session_id, page_num, image_list)
-        
+        else:
+            print("🖼️  No images to place")
+
         # Step 6: Generate final PDF
+        out_name = f"batch_{batch_id}_item_{item_index}.pdf"
+        print(f"🧪 Creating final PDF (upload) → {out_name}")
         result = pdf_processor.create_pdf_with_upload(
             session_id=session_id,
             user_id=user_id,
             num_pages=num_pages,
-            output_name=f"batch_{batch_id}_item_{item_index}.pdf"
+            output_name=out_name
         )
-        
         storage_url = result['storage_url']
-        storage_path = result['storage_path'] 
+        final_storage_path = result['storage_path']
 
-        print(f"  ✅ PDF generated")
-        print(f"     URL: {storage_url[:50]}...")
-        print(f"     Path: {storage_path}")
-        
-        
+        print(f"✅ PDF generated & uploaded")
+        print(f"   - signed URL: {storage_url[:100]}{'...' if len(storage_url) > 100 else ''}")
+        print(f"   - storage_path: {final_storage_path}")
+
         # Step 7: Cleanup
-        if temp_pdf_path and os.path.exists(temp_pdf_path):
-            os.unlink(temp_pdf_path)
-        
-        # Cleanup temp images  ← NEW!
-        for img_path in temp_image_paths:
-            if os.path.exists(img_path):
-                os.unlink(img_path)
-        
-        pdf_processor.cleanup_folders(session_id)
-        
-        return {
-            'storage_url': storage_url,
-            'storage_path': storage_path
-        }
-    
-    except Exception as e:
-        # Cleanup on error
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             try:
                 os.unlink(temp_pdf_path)
-            except:
-                pass
-        
-        # Cleanup temp images
+                print(f"🧹 Temp PDF removed: {temp_pdf_path}")
+            except Exception as _e:
+                print(f"⚠️  Failed to remove temp PDF {temp_pdf_path}: {_e}")
+
         for img_path in temp_image_paths:
             if os.path.exists(img_path):
                 try:
                     os.unlink(img_path)
-                except:
-                    pass
-        
+                    print(f"🧹 Temp image removed: {img_path}")
+                except Exception as _e:
+                    print(f"⚠️  Failed to remove temp image {img_path}: {_e}")
+
         try:
             pdf_processor.cleanup_folders(session_id)
-        except:
-            pass
-        
-        raise Exception(f"PDF generation failed: {str(e)}")
+            print(f"🧽 Session folder cleanup done for: {session_id}")
+        except Exception as _e:
+            print(f"⚠️  Session cleanup failed for {session_id}: {_e}")
 
+        print(f"🧩 fill_single_pdf_sync: END | batch_id={batch_id} item_index={item_index} ✅")
+        print("=" * 80 + "\n")
+
+        return {
+            'storage_url': storage_url,
+            'storage_path': final_storage_path
+        }
+
+    except Exception as e:
+        print(f"⛔ ERROR in fill_single_pdf_sync | batch_id={batch_id} item_index={item_index}: {e}")
+
+        # Cleanup on error
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            try:
+                os.unlink(temp_pdf_path)
+                print(f"🧹 Temp PDF removed (on error): {temp_pdf_path}")
+            except Exception as _e:
+                print(f"⚠️  Failed to remove temp PDF on error {temp_pdf_path}: {_e}")
+
+        for img_path in temp_image_paths:
+            if os.path.exists(img_path):
+                try:
+                    os.unlink(img_path)
+                    print(f"🧹 Temp image removed (on error): {img_path}")
+                except Exception as _e:
+                    print(f"⚠️  Failed to remove temp image on error {img_path}: {_e}")
+
+        try:
+            pdf_processor.cleanup_folders(session_id)
+            print(f"🧽 Session folder cleanup (on error) done for: {session_id}")
+        except Exception as _e:
+            print(f"⚠️  Session cleanup (on error) failed for {session_id}: {_e}")
+
+        print(f"🧩 fill_single_pdf_sync: END (ERROR) | batch_id={batch_id} item_index={item_index} ❌")
+        print("=" * 80 + "\n")
+
+        # Preserve your existing exception shape/message
+        raise Exception(f"PDF generation failed: {str(e)}")
 
 # ============================================================================
 # HEALTH CHECK
