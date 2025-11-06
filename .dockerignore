@@ -1,0 +1,61 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Temporary and output folders
+temp_pdf_uploads/
+gridded_pages/
+filled_pages/
+
+# Documentation, tests, notebooks
+docs/
+tests/
+*.ipynb
+notebooks/
+examples/
+
+# Version control & local config
+.git/
+.gitignore
+.python-version
+.env
+.DS_Store
+
+# OS / editor files
+*.swp
+*.swo
+*.bak
+*.tmp
+.idea/
+.vscode/
+
+# Render or deployment logs
+*.log
+*.pid
+
+# Fonts — optional:
+# comment this out if your app needs to load custom fonts at runtime
+# fonts/
+
+# Render-specific: KEEP THESE (do NOT ignore)
+# render.yaml
+# Dockerfile
+# uv.lock
+# pyproject.toml
+
+# App source
+# Keep main.py, app.py, routes/, services/, utils/
+# so don't exclude them
