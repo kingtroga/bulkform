@@ -62,7 +62,7 @@ def apply_grid(image_path, output_path):
     # Add labels
     try:
         font_size = max(8, int(width / 150))
-        font = ImageFont.truetype("arial.ttf", font_size)
+        font = ImageFont.truetype("fonts/arial.ttf", font_size)
     except:
         font = ImageFont.load_default()
     
