@@ -13,8 +13,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install uv and dependencies
-RUN pip install uv && \
-    uv sync --frozen
+RUN pip install --no-cache-dir uv && \
+    uv sync --frozen --no-dev
 
 # Copy application code
 COPY . .
@@ -23,4 +23,4 @@ COPY . .
 EXPOSE 8000
 
 # Start command
-CMD uv run uvicorn app:app --host 0.0.0.0 --port $PORT
+CMD uv run uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1

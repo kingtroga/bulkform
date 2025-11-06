@@ -22,3 +22,6 @@ dependencies = [
     "supabase>=2.22.2",
     "uvicorn[standard]>=0.38.0",
 ]
+
+[project.optional-dependencies]
+dev = ["ipykernel", "ipython", "jupyter", "matplotlib-inline", "pytest", "ruff"]
