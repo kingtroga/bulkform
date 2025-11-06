@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Q
 from typing import Optional, List, Dict
 import asyncio
 import uuid
-import os
+import os, time, random, threading
 import io
 import tempfile
 from pathlib import Path
@@ -49,6 +49,9 @@ router = APIRouter(prefix="/api/batch", tags=["Batch Processing"])
 MAX_BATCH_SIZE = 1000  # Maximum items per batch
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB max file size
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls', '.tsv'}
+_STORAGE_BYTES_CACHE = {}
+_STORAGE_BYTES_LOCK = threading.Lock()
+_SUPABASE_ENV_LOGGED = False  # avoid noisy repeated logs
 
 
 # ============================================================================
@@ -291,6 +294,114 @@ async def download_pdf_bytes(url: str) -> bytes:
     pdf_processor = PDFProcessor()
     return pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).download(url)
 
+def _normalize_storage_path(raw_path: str) -> str:
+    return (raw_path or "").strip().lstrip("/")
+
+def _log_supabase_env_once(supabase_client):
+    global _SUPABASE_ENV_LOGGED
+    if _SUPABASE_ENV_LOGGED:
+        return
+    _SUPABASE_ENV_LOGGED = True
+    try:
+        import re, jwt
+        url = os.environ.get("SUPABASE_URL", "")
+        key = os.environ.get("SUPABASE_KEY", "")
+        proj = ""
+        m = re.search(r"https://([a-z0-9\-]+)\.supabase\.co", url)
+        if m: proj = m.group(1)
+        role = "unknown"
+        try:
+            claims = jwt.decode(key, options={"verify_signature": False})
+            role = claims.get("role", role)
+        except Exception:
+            pass
+        print(f"🌍 Supabase env: url={url} project_ref={proj} key_len={len(key)} role={role}")
+    except Exception as e:
+        print(f"⚠️ Could not log Supabase env: {e}")
+
+def download_with_retries(
+    supabase_client,
+    bucket: str,
+    storage_path: str,
+    *,
+    max_attempts: int = 5,
+    base_delay: float = 0.25,
+    template_hint: Optional[str] = None
+) -> bytes:
+    """
+    Robust download for Supabase Storage with:
+    - path normalization
+    - parent prefix listing for existence check
+    - exponential backoff + jitter on 404/edge errors
+    - in-process memoization cache
+    """
+    # Detect accidental signed URL in pdf_url field
+    if storage_path.startswith("http://") or storage_path.startswith("https://"):
+        raise Exception(
+            f"Template pdf_url looks like a URL, expected storage path (got: {storage_path[:80]}...)"
+        )
+
+    path = _normalize_storage_path(storage_path)
+    cache_key = f"{bucket}:{path}"
+
+    # Cache hit?
+    with _STORAGE_BYTES_LOCK:
+        if cache_key in _STORAGE_BYTES_CACHE:
+            print(f"🧠 Cache hit for {cache_key}")
+            return _STORAGE_BYTES_CACHE[cache_key]
+
+    # Pre-list the parent prefix once (helps with read-after-write and path typos)
+    prefix = "/".join(path.split("/")[:-1])
+    fname  = path.split("/")[-1]
+    try:
+        listing = supabase_client.storage.from_(bucket).list(prefix)
+        names = [obj.get("name") for obj in listing]
+        print(f"📂 Listing '{prefix}' → {names[:20]}")
+        if fname not in names:
+            print("⚠️ Exact filename not found in prefix listing (may be case/space mismatch or eventual consistency).")
+    except Exception as e:
+        print(f"⚠️ Could not list prefix '{prefix}': {e}")
+
+    # Retry loop
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"⬇️  download() attempt {attempt}/{max_attempts} → {bucket}/{path}")
+            pdf_bytes = supabase_client.storage.from_(bucket).download(path)
+            print(f"✅ download() ok → {len(pdf_bytes)} bytes")
+            with _STORAGE_BYTES_LOCK:
+                _STORAGE_BYTES_CACHE[cache_key] = pdf_bytes
+            return pdf_bytes
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            is_404 = "404" in msg or "not_found" in msg.lower()
+            print(f"❌ download() failed (attempt {attempt}): {msg}")
+
+            # On the last attempt, dump env/role once to help spot RLS/env issues quickly
+            if attempt == max_attempts and is_404:
+                _log_supabase_env_once(supabase_client)
+
+            # Backoff before retrying (only if more attempts remain)
+            if attempt < max_attempts:
+                # Tiny re-list to help with consistency checks
+                try:
+                    listing = supabase_client.storage.from_(bucket).list(prefix)
+                    names = [obj.get("name") for obj in listing]
+                    print(f"🔎 Retrying, current '{prefix}' listing → {names[:20]}")
+                except Exception as e2:
+                    print(f"⚠️ Could not re-list prefix before retry: {e2}")
+
+                sleep_s = (base_delay * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
+                print(f"⏳ Backoff {sleep_s:.2f}s before retry...")
+                time.sleep(sleep_s)
+            else:
+                # No more attempts
+                break
+
+    # Out of attempts
+    hint = f" | template={template_hint}" if template_hint else ""
+    raise Exception(f"storage download 404/failed after {max_attempts} attempts for '{bucket}/{path}'{hint}: {last_err}")
 
 # ============================================================================
 # CREATE BATCH ENDPOINTS
@@ -642,19 +753,23 @@ def fill_single_pdf_sync(
 
     try:
         # Steps 1-3: Download template, convert to images
-        storage_path = template['pdf_url']
-        print(f"📦 Storage bucket: {pdf_processor.STORAGE_BUCKET}")
-        print(f"📥 Attempting to download template PDF:")
-        print(f"    - path: {storage_path}")
+        raw_path = template.get('pdf_url', '')
+        bucket = pdf_processor.STORAGE_BUCKET
+        print(f"📦 Storage bucket: {bucket}")
+        print(f"📥 Attempting to download template PDF:\n    - path: {raw_path}")
 
         try:
-            pdf_bytes = pdf_processor.supabase.storage.from_(
-                pdf_processor.STORAGE_BUCKET
-            ).download(storage_path)
+            pdf_bytes = download_with_retries(
+                pdf_processor.supabase,
+                bucket,
+                raw_path,
+                max_attempts=5,
+                base_delay=0.25,
+                template_hint=template.get("name")
+            )
             print(f"✅ Downloaded template bytes: {len(pdf_bytes)}")
         except Exception as dl_err:
             print(f"❌ Download failed from primary bucket '{pdf_processor.STORAGE_BUCKET}': {dl_err}")
-            # If you configured a fallback bucket on PDFProcessor, try it
             fb = getattr(pdf_processor, "FALLBACK_STORAGE_BUCKET", None)
             if fb:
                 print(f"🔁 Trying fallback bucket: {fb}")
@@ -678,10 +793,8 @@ def fill_single_pdf_sync(
 
         # Step 4: Build text data AND image data
         field_mappings = template['field_mappings']
-        pages_data = {}      # Text fields
-        images_data = {}     # Image fields
-
-        # Pre-counts for logs
+        pages_data = {}
+        images_data = {}
         text_field_count = 0
         image_field_count = 0
 
@@ -729,7 +842,7 @@ def fill_single_pdf_sync(
                         print(f"     ❌ Failed to load/place image '{image_ref}': {e}")
                 else:
                     print(f"     - No image provided in client_data for '{field_name}'")
-                continue  # skip to next field (don’t add as text)
+                continue  # skip to next field
 
             # TEXT / CHECKBOX fields
             if page not in pages_data:
@@ -737,7 +850,7 @@ def fill_single_pdf_sync(
 
             value = client_data.get(field_name, '')
 
-            # Checkbox handling with logs
+            # Checkbox handling
             if field_type == 'checkbox':
                 original = value
                 if isinstance(value, bool):
@@ -750,26 +863,45 @@ def fill_single_pdf_sync(
                     value = ''
                 print(f"     - Checkbox normalized: {repr(original)} → {repr(value)}")
 
+            # Font & size resolution (per-field + global)
+            font_key = f"{field_name}_font"
+            size_key = f"{field_name}_size"
+
+            font_value = (
+                client_data.get(font_key)
+                or client_data.get("font")
+                or field_config.get("font", "arial")
+            )
+            size_value = (
+                client_data.get(size_key)
+                or client_data.get("size")
+                or field_config.get("size", 12)
+            )
+            try:
+                size_value = int(size_value)
+            except (ValueError, TypeError):
+                size_value = 12
+
             value = str(value) if value is not None else ''
             entry = {
                 'text': value,
                 'x': field_config['x'],
                 'y': field_config['y'],
-                'size': field_config.get('size', 12),
-                'font': field_config.get('font', 'arial'),
+                'size': size_value,
+                'font': font_value,
                 'align': field_config.get('align', 'left')
             }
+
             pages_data[page].append(entry)
             text_field_count += 1
-            if len(value) > 80:
-                log_val = value[:77] + "..."
-            else:
-                log_val = value
-            print(f"     - Queued text: {log_val!r} at (x={entry['x']}, y={entry['y']}) page={page}")
+            log_val = value[:77] + "..." if len(value) > 80 else value
+            print(f"     - Queued text: {log_val!r} at (x={entry['x']}, y={entry['y']}) "
+                  f"[font={font_value}, size={size_value}] page={page}")
 
         # Step 5: Fill text fields
         total_text_items = sum(len(t) for t in pages_data.values())
-        print(f"✍️  Writing text fields: pages={sorted(pages_data.keys())}, total_text_items={total_text_items}, counted={text_field_count}")
+        print(f"✍️  Writing text fields: pages={sorted(pages_data.keys())}, "
+              f"total_text_items={total_text_items}, counted={text_field_count}")
         for page_num, text_data in pages_data.items():
             if text_data:
                 print(f"   → Page {page_num}: {len(text_data)} item(s)")
@@ -778,7 +910,8 @@ def fill_single_pdf_sync(
         # Step 5.5: Fill image fields
         if images_data:
             total_images = sum(len(imgs) for imgs in images_data.values())
-            print(f"🖼️  Placing images: pages={sorted(images_data.keys())}, total_images={total_images}, counted={image_field_count}")
+            print(f"🖼️  Placing images: pages={sorted(images_data.keys())}, "
+                  f"total_images={total_images}, counted={image_field_count}")
             for page_num, image_list in images_data.items():
                 if image_list:
                     print(f"   → Page {page_num}: {len(image_list)} image(s)")
@@ -835,7 +968,6 @@ def fill_single_pdf_sync(
     except Exception as e:
         print(f"⛔ ERROR in fill_single_pdf_sync | batch_id={batch_id} item_index={item_index}: {e}")
 
-        # Cleanup on error
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             try:
                 os.unlink(temp_pdf_path)
@@ -859,8 +991,6 @@ def fill_single_pdf_sync(
 
         print(f"🧩 fill_single_pdf_sync: END (ERROR) | batch_id={batch_id} item_index={item_index} ❌")
         print("=" * 80 + "\n")
-
-        # Preserve your existing exception shape/message
         raise Exception(f"PDF generation failed: {str(e)}")
 
 # ============================================================================
