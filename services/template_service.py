@@ -99,11 +99,13 @@ class TemplateService:
         """
         try:
             # Query with ownership verification (RLS handles this too, but double-check)
-            result = self.supabase.table(self.table_name).select("*").eq(
-                "id", template_id
-            ).eq(
-                "user_id", user_id
-            ).execute()
+            result = (
+                self.supabase.table(self.table_name)
+                .select("*")
+                .eq("id", template_id)
+                .or_(f"is_official.eq.true,user_id.eq.{user_id}")
+                .execute()
+            )
             
             if not result.data:
                 print(f"⚠️  Template not found or unauthorized: {template_id}")
@@ -279,11 +281,15 @@ class TemplateService:
             - Quick lookup by name
         """
         try:
-            result = self.supabase.table(self.table_name).select("*").eq(
-                "user_id", user_id
-            ).ilike(
-                "name", name
-            ).execute()
+            result = (
+                self.supabase.table(self.table_name)
+                .select("*")
+                .or_(
+                    f"and(is_official.eq.true,name.ilike.*{name}*),and(user_id.eq.{user_id},name.ilike.*{name}*)"
+                )
+                .execute()
+            )
+
             
             if not result.data:
                 return None
