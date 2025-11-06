@@ -42,6 +42,7 @@ from services.template_service import get_template_service
 from services.auth import get_current_user
 from services.pdf_processor import PDFProcessor
 from services.image_service import get_image_service
+from services.supabase_client import init_supabase, get_supabase
 
 router = APIRouter(prefix="/api/batch", tags=["Batch Processing"])
 
@@ -334,7 +335,12 @@ def download_with_retries(
     - parent prefix listing for existence check
     - exponential backoff + jitter on 404/edge errors
     - in-process memoization cache
+
+    FIX: Automatically refresh the global Supabase client on 404 errors.
     """
+    # NOTE: This function assumes `get_supabase()` and `init_supabase()`
+    # are imported from services.supabase_client and available in the global scope.
+
     # Detect accidental signed URL in pdf_url field
     if storage_path.startswith("http://") or storage_path.startswith("https://"):
         raise Exception(
@@ -352,9 +358,14 @@ def download_with_retries(
 
     # Pre-list the parent prefix once (helps with read-after-write and path typos)
     prefix = "/".join(path.split("/")[:-1])
-    fname  = path.split("/")[-1]
+    fname = path.split("/")[-1]
+    
+    # We must fetch the client explicitly here since the client instance might change
+    # during the loop below if a refresh is triggered.
+    current_client = get_supabase() 
+    
     try:
-        listing = supabase_client.storage.from_(bucket).list(prefix)
+        listing = current_client.storage.from_(bucket).list(prefix)
         names = [obj.get("name") for obj in listing]
         print(f"📂 Listing '{prefix}' → {names[:20]}")
         if fname not in names:
@@ -366,8 +377,12 @@ def download_with_retries(
     last_err = None
     for attempt in range(1, max_attempts + 1):
         try:
-            print(f"⬇️  download() attempt {attempt}/{max_attempts} → {bucket}/{path}")
-            pdf_bytes = supabase_client.storage.from_(bucket).download(path)
+            print(f"⬇️  download() attempt {attempt}/{max_attempts} → {bucket}/{path}")
+            
+            # Use the most current client instance (refreshed in previous loop iteration if needed)
+            current_client = get_supabase()
+            pdf_bytes = current_client.storage.from_(bucket).download(path)
+            
             print(f"✅ download() ok → {len(pdf_bytes)} bytes")
             with _STORAGE_BYTES_LOCK:
                 _STORAGE_BYTES_CACHE[cache_key] = pdf_bytes
@@ -378,15 +393,23 @@ def download_with_retries(
             is_404 = "404" in msg or "not_found" in msg.lower()
             print(f"❌ download() failed (attempt {attempt}): {msg}")
 
+            # ⬅️ CORE FIX: If 404 is detected, refresh the client for the next retry
+            if is_404 and attempt < max_attempts:
+                print(f"🔄 Detected 404/not_found error. Reinitializing global Supabase client...")
+                # Assuming init_supabase is imported and updates the global client
+                init_supabase() 
+                # The next iteration will automatically fetch the new client via get_supabase()
+                
             # On the last attempt, dump env/role once to help spot RLS/env issues quickly
             if attempt == max_attempts and is_404:
-                _log_supabase_env_once(supabase_client)
+                _log_supabase_env_once(current_client)
 
             # Backoff before retrying (only if more attempts remain)
             if attempt < max_attempts:
                 # Tiny re-list to help with consistency checks
                 try:
-                    listing = supabase_client.storage.from_(bucket).list(prefix)
+                    # Use the current client fetched at the beginning of the block
+                    listing = current_client.storage.from_(bucket).list(prefix) 
                     names = [obj.get("name") for obj in listing]
                     print(f"🔎 Retrying, current '{prefix}' listing → {names[:20]}")
                 except Exception as e2:
