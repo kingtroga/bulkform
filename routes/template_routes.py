@@ -155,8 +155,6 @@ async def create_template(
         raise HTTPException(status_code=500, detail=f"Failed to create template: {str(e)}")
 
 
-
-
 @router.get("", response_model=TemplateListResponse)
 async def list_templates(
     limit: int = Query(default=100, ge=1, le=500, description="Max templates to return"),
@@ -238,11 +236,16 @@ async def search_templates(
     """
     try:
         # Use Supabase ilike for case-insensitive partial search
-        result = template_service.supabase.table("pdf_templates").select("*").eq(
-            "user_id", current_user['id']
-        ).ilike(
-            "name", f"%{query}%"  # Partial match
-        ).execute()
+        result = (
+                template_service.supabase
+                .table("pdf_templates")
+                .select("*")
+                .or_(
+                    # match official templates by name OR user's own templates by name
+                    f"and(is_official.eq.true,name.ilike.*{query}*),and(user_id.eq.{current_user['id']},name.ilike.*{query}*)"
+                )
+                .execute()
+            )
         
         templates = result.data if result.data else []
         
@@ -415,26 +418,42 @@ async def delete_template(
     Official templates cannot be deleted by regular users.
     """
     try:
-        success = template_service.delete_template(
-            template_id=template_id,
-            user_id=current_user['id']
+        # Check if template is official
+        template_row = (
+            template_service.supabase.table("pdf_templates")
+            .select("is_official")
+            .eq("id", template_id)
+            .single()
+            .execute()
         )
-        
+
+        if template_row.data and template_row.data.get("is_official"):
+            raise HTTPException(
+                status_code=403,
+                detail="Official templates cannot be deleted by regular users"
+            )
+
+        success = template_service.delete_template(
+                template_id=template_id,
+                user_id=current_user['id']
+            )
+
         if not success:
             raise HTTPException(
                 status_code=404,
                 detail="Template not found or unauthorized"
             )
-        
+
         return TemplateDeletedResponse(
             message="Template deleted successfully",
             template_id=template_id
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete template: {str(e)}")
+
 
 
 # ============================================================================

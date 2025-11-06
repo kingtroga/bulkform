@@ -10,8 +10,8 @@ print("🧪 BATCH SERVICE - COMPLETE TEST SUITE")
 print("=" * 70)
 
 # ⚠️ REPLACE with your actual user_id and template_id
-YOUR_USER_ID = "d18772bf-7605-4297-8a34-12d8e626199d"
-YOUR_TEMPLATE_ID = "cdb1b643-c389-4a22-a065-f05247eece35"  # Use an existing template
+YOUR_USER_ID = ""
+YOUR_TEMPLATE_ID = ""  # Use an existing template
 
 # Initialize service
 batch_service = get_batch_service()
