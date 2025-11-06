@@ -6,6 +6,7 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi import HTTPException, status
 from contextlib import asynccontextmanager
 from services.supabase_client import init_supabase
+from services.pdf_processor import TEMP_FOLDER, GRIDDED_FOLDER, OUTPUT_FOLDER
 from routes.basic_auth import router as basic_auth_router
 from routes.token_auth import router as token_auth_router
 from routes.password_auth import router as password_auth_router
@@ -16,6 +17,8 @@ from routes.profile import router as profile_router
 from routes.template_routes import router as template_router
 from routes.batch_routes import router as batch_router
 from routes.image_routes import router as image_router
+from utils.cleanup import clear_folder
+from pathlib import Path
 from dotenv import load_dotenv
 import secrets
 
@@ -51,6 +54,16 @@ async def lifespan(app: FastAPI):
         print("✅ Supabase connected successfully")
     except Exception as e:
         print(f"⚠️  Warning: Supabase initialization failed: {e}")
+
+    clear_folder(TEMP_FOLDER)
+    clear_folder(GRIDDED_FOLDER)
+    clear_folder(OUTPUT_FOLDER)
+    try:
+        clear_folder("temp_pages")
+    except Exception as e:
+        print("Error while cleaning 'temp_pages': ", str(e))
+    
+    print("✅ All temporary folders cleaned up")
     
     yield
     
