@@ -6,7 +6,7 @@ SPEED: 100 PDFs in ~2-5 minutes with 10 workers (vs 43 mins sequential)
 """
 
 from celery_config import celery_app
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 import time
 
 # Import your existing services
@@ -50,7 +50,126 @@ def cleanup_temp_files(temp_pdf_path: str, temp_image_paths: list, session_id: s
     except Exception as e:
         print(f"⚠️  Session cleanup failed for {session_id}: {e}")
 
+def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
+    if not only_param:
+        return None
+    indices = set()
+    for part in only_param.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = map(int, part.split("-"))
+                indices.update(range(start, end + 1))
+            except ValueError:
+                raise ValueError(f"Invalid range: {part}")
+        else:
+            try:
+                indices.add(int(part))
+            except ValueError:
+                raise ValueError(f"Invalid item index: {part}")
+    return indices
 
+
+def create_streaming_zip_sync(
+    batch_id: str,
+    user_id: str,
+    only_indices: Optional[Set[int]] = None,
+) -> tuple:
+    """
+    Create ZIP file synchronously (for Celery task).
+    Returns (zip_storage_path, signed_url) for immediate download.
+    """
+    batch_service = get_batch_service()
+    pdf_processor = PDFProcessor()
+    
+    batch = batch_service.get_batch(batch_id, user_id)
+    if not batch:
+        raise Exception(f"Batch not found: {batch_id}")
+    
+    completed = batch_service.get_batch_items(batch_id, status="completed")
+    if not completed:
+        raise Exception(f"No completed items in batch {batch_id}")
+    
+    if only_indices:
+        completed = [
+            item for item in completed 
+            if item.get("item_index") in only_indices
+        ]
+    
+    print(f"\n📦 [create_streaming_zip_sync] Starting for batch {batch_id}")
+    print(f"📦 Total items: {len(completed)}")
+    
+    # Create temp zip file
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
+        zip_path = tmp_zip.name
+    
+    try:
+        import zipfile as zf_module
+        files_added = 0
+        
+        with zf_module.ZipFile(zip_path, 'w', zf_module.ZIP_DEFLATED) as zipf:
+            for item in completed:
+                storage_path = item.get("storage_path")
+                item_index = item.get("item_index", 0)
+                
+                if not storage_path:
+                    print(f"   ⚠️ Item {item_index}: No storage_path, skipping")
+                    continue
+                
+                filename = f"form_{item_index}.pdf"
+                
+                try:
+                    # Download from Supabase storage
+                    pdf_bytes = pdf_processor.supabase.storage.from_(
+                        pdf_processor.STORAGE_BUCKET
+                    ).download(storage_path)
+                    
+                    # Add to ZIP
+                    zipf.writestr(filename, pdf_bytes)
+                    files_added += 1
+                    
+                    if files_added % 10 == 0:
+                        print(f"   ✅ Added {files_added} files...")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Item {item_index}: Failed - {str(e)}")
+                    continue
+        
+        print(f"✅ ZIP created locally: {files_added} files")
+        
+        # Upload to storage
+        zip_size = os.path.getsize(zip_path)
+        print(f"📤 Uploading {zip_size} bytes to Supabase...")
+        
+        zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
+        
+        with open(zip_path, 'rb') as f:
+            pdf_processor.supabase.storage.from_(
+                pdf_processor.STORAGE_BUCKET
+            ).upload(
+                path=zip_storage_path,
+                file=f.read(),
+                file_options={"content-type": "application/zip", "upsert": "true"}
+            )
+        
+        # Generate signed URL
+        signed_url_response = pdf_processor.supabase.storage.from_(
+            pdf_processor.STORAGE_BUCKET
+        ).create_signed_url(zip_storage_path, 3600)
+        
+        signed_url = signed_url_response['signedURL']
+        
+        print(f"✅ ZIP uploaded and ready for download")
+        print(f"✅ URL: {signed_url[:80]}...")
+        
+        return (zip_storage_path, signed_url)
+    
+    finally:
+        # Cleanup temp file
+        if os.path.exists(zip_path):
+            os.unlink(zip_path)
+            print(f"🧹 Temp ZIP cleaned up")
 
 # ============================================================================
 # FIELD DATA BUILDER
@@ -701,6 +820,32 @@ def create_batch_zip_task(
     
     except Exception as e:
         print(f"❌ Zip creation failed: {str(e)}")
+        raise
+
+@celery_app.task(
+    name='celery_tasks.create_zip_task',
+    soft_time_limit=1800,   # 30 min
+    time_limit=2000,        # hard kill after soft
+    queue='zip_creation'
+)
+def create_zip_task(batch_id: str, user_id: str, only_indices: list = None):
+    """
+    Create ZIP file in background Celery worker (non-blocking).
+    
+    The API returns immediately after queueing this task.
+    ZIP is created in parallel by a dedicated worker.
+    User can stream it instantly once ready.
+    """
+    print(f"\n📦 [Celery Worker] Creating ZIP for batch: {batch_id}")
+    
+    try:
+        only_set = set(only_indices) if only_indices else None
+        result = create_streaming_zip_sync(batch_id, user_id, only_set)
+        print(f"✅ ZIP task complete: {batch_id}")
+        return result
+    
+    except Exception as e:
+        print(f"❌ ZIP task failed: {str(e)}")
         raise
 
 

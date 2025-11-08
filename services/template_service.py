@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any
 import uuid
 from datetime import datetime
 from services.supabase_client import get_supabase
+from services.template_cache import cache_template, invalidate_template_cache, invalidate_user_templates
 
 
 class TemplateService:
@@ -75,7 +76,7 @@ class TemplateService:
             print(f"❌ Failed to create template: {str(e)}")
             raise Exception(f"Template creation failed: {str(e)}")
     
-    
+    @cache_template(ttl=3600)
     def get_template(self, template_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """
         Get a specific template by ID
@@ -214,6 +215,7 @@ class TemplateService:
                 return False
             
             print(f"✅ Template updated: {template_id}")
+            invalidate_template_cache(template_id, user_id)
             return True
         
         except Exception as e:
@@ -254,6 +256,7 @@ class TemplateService:
             # So we can't check result.data, just assume success if no exception
             
             print(f"✅ Template deleted: {template_id}")
+            invalidate_template_cache(template_id, user_id)
             return True
         
         except Exception as e:

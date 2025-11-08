@@ -8,6 +8,7 @@ from celery_tasks import trigger_parallel_batch, create_batch_zip_task
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 import zipstream
+import os
 import httpx
 from services.pdf_processor import PDFProcessor
 from typing import Optional, Set
@@ -63,24 +64,120 @@ def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
     return indices
 
 
+def create_streaming_zip_sync(
+    batch_id: str,
+    user_id: str,
+    only_indices: Optional[Set[int]] = None,
+) -> tuple:
+    """
+    Create ZIP file synchronously (for Celery task).
+    Returns (zip_storage_path, signed_url) for immediate download.
+    """
+    batch_service = get_batch_service()
+    pdf_processor = PDFProcessor()
+    
+    batch = batch_service.get_batch(batch_id, user_id)
+    if not batch:
+        raise Exception(f"Batch not found: {batch_id}")
+    
+    completed = batch_service.get_batch_items(batch_id, status="completed")
+    if not completed:
+        raise Exception(f"No completed items in batch {batch_id}")
+    
+    if only_indices:
+        completed = [
+            item for item in completed 
+            if item.get("item_index") in only_indices
+        ]
+    
+    print(f"\n📦 [create_streaming_zip_sync] Starting for batch {batch_id}")
+    print(f"📦 Total items: {len(completed)}")
+    
+    # Create temp zip file
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
+        zip_path = tmp_zip.name
+    
+    try:
+        import zipfile as zf_module
+        files_added = 0
+        
+        with zf_module.ZipFile(zip_path, 'w', zf_module.ZIP_DEFLATED) as zipf:
+            for item in completed:
+                storage_path = item.get("storage_path")
+                item_index = item.get("item_index", 0)
+                
+                if not storage_path:
+                    print(f"   ⚠️ Item {item_index}: No storage_path, skipping")
+                    continue
+                
+                filename = f"form_{item_index}.pdf"
+                
+                try:
+                    # Download from Supabase storage
+                    pdf_bytes = pdf_processor.supabase.storage.from_(
+                        pdf_processor.STORAGE_BUCKET
+                    ).download(storage_path)
+                    
+                    # Add to ZIP
+                    zipf.writestr(filename, pdf_bytes)
+                    files_added += 1
+                    
+                    if files_added % 10 == 0:
+                        print(f"   ✅ Added {files_added} files...")
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Item {item_index}: Failed - {str(e)}")
+                    continue
+        
+        print(f"✅ ZIP created locally: {files_added} files")
+        
+        # Upload to storage
+        zip_size = os.path.getsize(zip_path)
+        print(f"📤 Uploading {zip_size} bytes to Supabase...")
+        
+        zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
+        
+        with open(zip_path, 'rb') as f:
+            pdf_processor.supabase.storage.from_(
+                pdf_processor.STORAGE_BUCKET
+            ).upload(
+                path=zip_storage_path,
+                file=f.read(),
+                file_options={"content-type": "application/zip", "upsert": "true"}
+            )
+        
+        # Generate signed URL
+        signed_url_response = pdf_processor.supabase.storage.from_(
+            pdf_processor.STORAGE_BUCKET
+        ).create_signed_url(zip_storage_path, 3600)
+        
+        signed_url = signed_url_response['signedURL']
+        
+        print(f"✅ ZIP uploaded and ready for download")
+        print(f"✅ URL: {signed_url[:80]}...")
+        
+        return (zip_storage_path, signed_url)
+    
+    finally:
+        # Cleanup temp file
+        if os.path.exists(zip_path):
+            os.unlink(zip_path)
+            print(f"🧹 Temp ZIP cleaned up")
+
+
 async def stream_batch_zip(
     batch_id: str,
     user_id: str,
     only_indices: Optional[Set[int]] = None,
 ):
     """
-    Stream batch PDFs as ZIP without buffering to disk/memory.
+    Stream batch PDFs as ZIP without blocking.
     
-    KEY FIX: 
-    1. Create ZipFile WITHOUT context manager (manual lifecycle)
-    2. Add all files 
-    3. Iterate to stream chunks
-    4. Close in finally block
-    
-    This ensures ZIP is finalized BEFORE streaming starts.
+    Now uses a Celery task to create the ZIP, then streams from storage.
+    This prevents blocking the event loop.
     """
     batch_service = get_batch_service()
-    pdf_processor = PDFProcessor()
     
     batch = batch_service.get_batch(batch_id, user_id)
     if not batch:
@@ -96,63 +193,46 @@ async def stream_batch_zip(
             if item.get("item_index") in only_indices
         ]
     
-    print(f"\n🎬 [stream_batch_zip] Starting for batch {batch_id}")
-    print(f"📦 Total items to stream: {len(completed)}")
+    print(f"\n🎬 [stream_batch_zip] Batch {batch_id} - {len(completed)} items")
     
-    # CRITICAL: NO context manager - manual lifecycle
-    zf = zipstream.ZipFile(compression=zipstream.ZIP_DEFLATED)
+    # Offload ZIP creation to Celery (non-blocking)
+    from celery_tasks import create_zip_task
+    
+    print(f"📤 Queueing ZIP creation to Celery...")
+    task = create_zip_task.delay(
+        batch_id=batch_id,
+        user_id=user_id,
+        only_indices=list(only_indices) if only_indices else None
+    )
+    
+    print(f"⏳ Waiting for ZIP to be created (task: {task.id})...")
     
     try:
-        # Phase 1: Load all files into ZipFile
-        files_added = 0
-        for item in completed:
-            storage_path = item.get("storage_path")
-            item_index = item.get("item_index", 0)
-            
-            if not storage_path:
-                print(f"   ⚠️ Item {item_index}: No storage_path, skipping")
-                continue
-            
-            filename = f"form_{item_index}.pdf"
-            
-            try:
-                # Download from Supabase storage
-                pdf_bytes = pdf_processor.supabase.storage.from_(
-                    pdf_processor.STORAGE_BUCKET
-                ).download(storage_path)
-                
-                # Add to ZIP in memory
-                zf.write_iter(filename, [pdf_bytes])
-                files_added += 1
-                
-                if files_added % 10 == 0:
-                    print(f"   ✅ Added {files_added} files...")
-                
-            except Exception as e:
-                print(f"   ⚠️ Item {item_index}: Failed to download - {str(e)}")
-                continue
+        # Wait for Celery task with timeout
+        result = task.get(timeout=300)  # 5 minute timeout
+        zip_storage_path, signed_url = result
         
-        print(f"✅ All files loaded into ZIP: {files_added} files")
+        print(f"✅ ZIP created, streaming from storage...")
         
-        # Phase 2: Stream ZIP chunks to client
-        print(f"📡 Starting to stream ZIP to client...")
-        chunk_count = 0
-        total_bytes = 0
+        # Now stream the ZIP from storage
+        pdf_processor = PDFProcessor()
         
-        for chunk in zf:
-            chunk_count += 1
-            total_bytes += len(chunk)
-            yield chunk
+        zip_bytes = pdf_processor.supabase.storage.from_(
+            pdf_processor.STORAGE_BUCKET
+        ).download(zip_storage_path)
         
-        print(f"✅ Stream complete: {chunk_count} chunks, {total_bytes} bytes")
+        print(f"✅ Downloaded ZIP ({len(zip_bytes)} bytes), streaming to client...")
+        
+        # Stream in chunks
+        chunk_size = 65536  # 64KB chunks
+        for i in range(0, len(zip_bytes), chunk_size):
+            yield zip_bytes[i:i + chunk_size]
+        
+        print(f"✅ Stream complete")
     
-    finally:
-        # Phase 3: Cleanup
-        try:
-            zf.close()
-            print(f"🧹 ZipFile closed")
-        except Exception as e:
-            print(f"⚠️ Error closing ZipFile: {str(e)}")
+    except Exception as e:
+        print(f"❌ ZIP creation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ZIP creation failed: {str(e)}")
 
 
 @router.get("/{batch_id}/download-live")
