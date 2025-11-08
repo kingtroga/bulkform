@@ -21,6 +21,61 @@ class BatchService:
         self.batch_table = "batch_jobs"
         self.items_table = "batch_items"
         print("✅ Batch Service initialized")
+
+        # --- NEW: internal helpers ---------------------------------------------
+
+    def _count_items(self, batch_id: str, status: Optional[str] = None) -> int:
+        """
+        Count items in batch, optionally by status.
+        Uses Supabase exact count to avoid fetching rows.
+        """
+        try:
+            q = (self.supabase
+                 .table(self.items_table)
+                 .select("id", count="exact")
+                 .eq("batch_id", batch_id))
+            if status:
+                q = q.eq("status", status)
+            res = q.execute()
+            return res.count or 0
+        except Exception as e:
+            print(f"❌ _count_items failed: {e}")
+            return 0
+
+    def get_item_counts(self, batch_id: str) -> Dict[str, int]:
+        """
+        Authoritative counts from batch_items (source of truth).
+        """
+        total      = self._count_items(batch_id, None)       # all rows
+        completed  = self._count_items(batch_id, "completed")
+        failed     = self._count_items(batch_id, "failed")
+        pending    = self._count_items(batch_id, "pending")
+        processing = self._count_items(batch_id, "processing")
+        # In case of any mismatch, recompute pending as a fallback:
+        if total and (completed + failed + pending + processing) != total:
+            pending = max(total - completed - failed - processing, 0)
+        return {
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "pending": pending,
+            "processing": processing,
+        }
+
+    def _reconcile_batch_counters(self, batch_id: str, counts: Dict[str, int]) -> None:
+        """
+        Optionally sync the batch_jobs counters to match items.
+        Does NOT touch status here.
+        """
+        try:
+            self.supabase.table(self.batch_table).update({
+                "completed": counts["completed"],
+                "failed": counts["failed"],
+                "total_items": counts["total"],
+            }).eq("id", batch_id).execute()
+        except Exception as e:
+            print(f"⚠️  Failed to reconcile batch counters: {e}")
+
     
     
     def create_batch(
@@ -363,37 +418,45 @@ class BatchService:
         user_id: str
     ) -> Dict[str, Any]:
         """
-        Get batch processing progress
-        
-        Args:
-            batch_id: UUID of batch
-            user_id: UUID of user (for ownership check)
-            
-        Returns:
-            Progress dict with stats
+        Progress computed from items (authoritative), not the batch counters.
+        Keeps batch counters reconciled for UI convenience.
         """
         try:
             batch = self.get_batch(batch_id, user_id)
-            
             if not batch:
                 return {"error": "Batch not found"}
-            
-            total = batch["total_items"]
-            completed = batch["completed"]
-            failed = batch["failed"]
-            pending = total - completed - failed
-            
-            progress_pct = round((completed + failed) / total * 100, 1) if total > 0 else 0
-            
-            # Simple time estimation (assume 2 seconds per item)
+
+            counts = self.get_item_counts(batch_id)
+            # Reconcile counters (optional but recommended for UI/queries)
+            self._reconcile_batch_counters(batch_id, counts)
+
+            total      = counts["total"]
+            completed  = counts["completed"]
+            failed     = counts["failed"]
+            pending    = counts["pending"]
+            processing = counts["processing"]
+
+            # Derive an honest status from counts if batch.status is misleading
+            derived_status = batch["status"]
+            if total == 0:
+                derived_status = "pending"
+            elif pending == 0 and processing == 0:
+                derived_status = "completed" if failed == 0 else "completed_with_errors"
+            elif completed == 0 and failed == 0:
+                derived_status = "pending"  # nothing started yet
+            else:
+                derived_status = "processing"
+
+            progress_pct = round(((completed + failed) / total * 100), 1) if total > 0 else 0
+
+            # Simple ETA (tweak if you keep historical durations)
             if pending > 0 and progress_pct > 0:
-                avg_time_per_item = 2  # seconds
+                avg_time_per_item = 2  # seconds (your previous heuristic)
                 est_seconds = pending * avg_time_per_item
-                est_minutes = round(est_seconds / 60, 1)
-                est_time = f"{est_minutes} minutes" if est_minutes >= 1 else f"{est_seconds} seconds"
+                est_time = f"{round(est_seconds/60,1)} minutes" if est_seconds >= 60 else f"{est_seconds} seconds"
             else:
                 est_time = "Complete!"
-            
+
             return {
                 "batch_id": batch_id,
                 "batch_name": batch["batch_name"],
@@ -401,18 +464,18 @@ class BatchService:
                 "completed": completed,
                 "failed": failed,
                 "pending": pending,
-                "status": batch["status"],
+                "status": derived_status,
                 "progress_percentage": progress_pct,
                 "estimated_time_remaining": est_time,
                 "download_url": batch.get("download_url"),
                 "created_at": batch["created_at"],
-                "updated_at": batch["updated_at"]
+                "updated_at": batch["updated_at"],
             }
-        
+
         except Exception as e:
             print(f"❌ Failed to get progress: {str(e)}")
             return {"error": str(e)}
-    
+
     
     def delete_batch(
         self,
@@ -546,6 +609,54 @@ class BatchService:
         
         except Exception as e:
             print(f"❌ Failed to retry items: {str(e)}")
+            return False
+
+    def reset_items_status(
+        self,
+        batch_id: str,
+        user_id: str,
+        from_statuses: Optional[List[str]] = None,
+        to_status: str = "pending"
+    ) -> bool:
+        """
+        Bulk reset items whose status is in `from_statuses` to `to_status`.
+        Also reconciles batch counters and marks batch as 'pending'.
+
+        Default: reset ['failed','processing','pending'] -> 'pending'
+        """
+        try:
+            # Ownership check
+            batch = self.get_batch(batch_id, user_id)
+            if not batch:
+                print("⚠️  reset_items_status: batch not found / unauthorized")
+                return False
+
+            if not from_statuses:
+                from_statuses = ["failed", "processing", "pending"]
+
+            # Update items
+            upd = (self.supabase
+                   .table(self.items_table)
+                   .update({"status": to_status, "error_message": None})
+                   .eq("batch_id", batch_id)
+                   .in_("status", from_statuses)
+                   .execute())
+
+            # Recompute counters from items and reconcile
+            counts = self.get_item_counts(batch_id)
+            self._reconcile_batch_counters(batch_id, counts)
+
+            # Put batch back to 'pending' so caller can re-queue work
+            self.supabase.table(self.batch_table).update({
+                "status": "pending"
+            }).eq("id", batch_id).execute()
+
+            print(f"✅ reset_items_status: moved {len(upd.data) if upd and upd.data else 'some'} items "
+                  f"from {from_statuses} to '{to_status}'")
+            return True
+
+        except Exception as e:
+            print(f"❌ reset_items_status failed: {e}")
             return False
 
 

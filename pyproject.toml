@@ -24,6 +24,7 @@ dependencies = [
     "stripe>=13.2.0",
     "supabase>=2.22.2",
     "uvicorn[standard]>=0.38.0",
+    "zipstream>=1.1.4",
 ]
 
 [project.optional-dependencies]
