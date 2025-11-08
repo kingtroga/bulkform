@@ -1,32 +1,9 @@
 """
-Batch Service
+Batch Service - FIXED VERSION
 Manages batch PDF generation jobs from CSV/Excel data
 
-Workflow:
-1. User uploads CSV with client data
-2. Selects template (I-485, etc.)
-3. Batch Service creates batch job + items
-4. Processes each item (fill PDF for each row)
-5. Tracks progress (completed/failed counts)
-6. Returns download URLs
-
-Example:
-    # Create batch from CSV data
-    batch_id = batch_service.create_batch(
-        user_id="user-123",
-        template_id="template-456",
-        items=[
-            {"first_name": "John", "last_name": "Smith"},
-            {"first_name": "Jane", "last_name": "Doe"}
-        ]
-    )
-    
-    # Process batch (fills PDFs)
-    result = batch_service.process_batch(batch_id)
-    
-    # Check progress
-    progress = batch_service.get_batch_progress(batch_id)
-    # Returns: {"total": 2, "completed": 2, "failed": 0, "status": "completed"}
+Key Fix: Removed auto-status update from increment_batch_counters
+to prevent premature "completed" status while items are still processing.
 """
 
 from typing import List, Dict, Any, Optional
@@ -60,22 +37,10 @@ class BatchService:
             user_id: UUID of user creating batch
             template_id: UUID of template to use
             items: List of data dicts (one per PDF to generate)
-                Example: [
-                    {"first_name": "John", "last_name": "Smith"},
-                    {"first_name": "Jane", "last_name": "Doe"}
-                ]
             batch_name: Optional name for batch
             
         Returns:
             UUID string of created batch job
-            
-        Example:
-            batch_id = batch_service.create_batch(
-                user_id="abc-123",
-                template_id="def-456",
-                items=[...],
-                batch_name="October 2025 Green Cards"
-            )
         """
         try:
             # Validate inputs
@@ -145,19 +110,6 @@ class BatchService:
             
         Returns:
             Batch dict if found, None otherwise
-            
-        Example return:
-            {
-                "id": "batch-123",
-                "user_id": "user-456",
-                "template_id": "template-789",
-                "batch_name": "October Green Cards",
-                "total_items": 50,
-                "completed": 45,
-                "failed": 2,
-                "status": "processing",
-                "created_at": "2025-11-03T10:00:00Z"
-            }
         """
         try:
             result = self.supabase.table(self.batch_table).select("*").eq(
@@ -307,7 +259,7 @@ class BatchService:
         item_id: str,
         status: str,
         pdf_url: Optional[str] = None,
-        storage_path: Optional[str] = None,  # ← ADD THIS
+        storage_path: Optional[str] = None,
         error_message: Optional[str] = None
     ) -> bool:
         """
@@ -317,7 +269,7 @@ class BatchService:
             item_id: UUID of batch item
             status: New status
             pdf_url: Download URL (expires in 1 hour)
-            storage_path: Storage path (permanent) ← NEW!
+            storage_path: Storage path (permanent)
             error_message: Error message if failed
         """
         try:
@@ -326,7 +278,7 @@ class BatchService:
             if pdf_url:
                 updates["pdf_url"] = pdf_url
             
-            if storage_path:  # ← ADD THIS
+            if storage_path:
                 updates["storage_path"] = storage_path
             
             if error_message:
@@ -363,6 +315,14 @@ class BatchService:
             
         Returns:
             True if successful
+            
+        IMPORTANT:
+            Does NOT auto-update status to "completed". 
+            Status should be managed by the batch processor 
+            (process_batch_sync) after verifying all items are done.
+            
+            This prevents premature "completed" status when items
+            are still being processed (status="processing").
         """
         try:
             # Get current counts
@@ -377,18 +337,14 @@ class BatchService:
             new_completed = current["completed"] + completed
             new_failed = current["failed"] + failed
             
-            # Update counts
+            # Update counts only - status managed separately by process_batch_sync
             updates = {
                 "completed": new_completed,
                 "failed": new_failed
             }
             
-            # Auto-update status if all done
-            if new_completed + new_failed >= current["total_items"]:
-                if new_failed == 0:
-                    updates["status"] = "completed"
-                else:
-                    updates["status"] = "completed_with_errors"
+            # ❌ REMOVED: Auto-status update that caused Bug #2
+            # The batch processor will set status after verifying all items
             
             result = self.supabase.table(self.batch_table).update(updates).eq(
                 "id", batch_id
@@ -415,18 +371,6 @@ class BatchService:
             
         Returns:
             Progress dict with stats
-            
-        Example return:
-            {
-                "batch_id": "abc-123",
-                "total": 50,
-                "completed": 45,
-                "failed": 2,
-                "pending": 3,
-                "status": "processing",
-                "progress_percentage": 94.0,
-                "estimated_time_remaining": "2 minutes"
-            }
         """
         try:
             batch = self.get_batch(batch_id, user_id)
@@ -591,7 +535,7 @@ class BatchService:
                     error_message=None
                 )
             
-            # Update batch counters
+            # Update batch counters and status
             self.supabase.table(self.batch_table).update({
                 "failed": 0,
                 "status": "pending"

@@ -42,9 +42,9 @@ session_service = SessionService()
 # - ThreadPoolExecutor is fast enough for our use case
 # - Can handle both I/O and CPU work effectively with enough threads
 
-executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bulkform")
+executor = ThreadPoolExecutor(max_workers=30, thread_name_prefix="bulkform")
 
-print("✅ Async executor initialized: 4 threads")
+print("✅ Async executor initialized: 30 threads")
 
 
 # ============================================================================
