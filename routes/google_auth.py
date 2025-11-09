@@ -1,9 +1,15 @@
 from fastapi import APIRouter, HTTPException, status, Query
+from fastapi.responses import RedirectResponse
 from services.supabase_client import get_supabase
 import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 router = APIRouter(prefix="/api/auth/google", tags=["OAuth - Google"])
 
+FRONTEND_URL=os.getenv("FRONTEND_URL", "http://localhost:8001")
 
 @router.get("")
 async def google_login():
@@ -67,21 +73,35 @@ async def google_callback(
             )
         
         user_metadata = getattr(response.user, 'user_metadata', {}) or {}
-        
-        return {
-            "access_token": response.session.access_token,
-            "refresh_token": response.session.refresh_token,
-            "expires_in": getattr(response.session, 'expires_in', 3600),
-            "token_type": "bearer",
-            "user": {
-                "id": response.user.id,
-                "email": response.user.email,
-                "name": user_metadata.get("full_name") or user_metadata.get("name", ""),
-                "avatar": user_metadata.get("avatar_url") or user_metadata.get("picture", ""),
-                "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None
-            },
-            "message": "Google authentication successful"
+
+        access_token = response.session.access_token
+        refresh_token = response.session.refresh_token
+        user = {
+            "id": response.user.id,
+            "email": response.user.email,
+            "name": user_metadata.get("full_name") or user_metadata.get("name", ""),
+            "avatar": user_metadata.get("avatar_url") or user_metadata.get("picture", ""),
+            "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None
         }
+
+        #return {
+        #    "access_token": response.session.access_token,
+        #    "refresh_token": response.session.refresh_token,
+        #    "expires_in": getattr(response.session, 'expires_in', 3600),
+        #    "token_type": "bearer",
+        #    "user": {
+        #        "id": response.user.id,
+        #        "email": response.user.email,
+        #        "name": user_metadata.get("full_name") or user_metadata.get("name", ""),
+        #        "avatar": user_metadata.get("avatar_url") or user_metadata.get("picture", ""),
+        #        "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None
+        #    },
+        #    "message": "Google authentication successful"
+        #}
+
+        return RedirectResponse(
+                url=f"{FRONTEND_URL}/auth/callback?access_token={access_token}&refresh_token={refresh_token}&user={json.dumps(user)}"
+            )
         
     except HTTPException:
         raise
