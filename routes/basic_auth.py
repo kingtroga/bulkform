@@ -15,10 +15,12 @@ router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 async def signup(credentials: SignUpRequest):
     try:
         supabase = get_supabase()
+        print("Starting signup...")
         response = supabase.auth.sign_up({
             "email": credentials.email,
             "password": credentials.password
         })
+        print(f"Signup response: user={response.user}, session={response.session}")
 
         if not response.user:
             raise HTTPException(
@@ -26,25 +28,34 @@ async def signup(credentials: SignUpRequest):
                 detail="Failed to create user"
             )
         
-        # Profile is auto-created by trigger, fetch it
-        profile = supabase.table("profiles").select("*").eq("id", response.user.id).single().execute()
+        try:
+            profile = supabase.table("profiles").select("*").eq("id", response.user.id).single().execute()
+            user_data = profile.data
+        except Exception as profile_error:
+            print(f"Profile fetch failed: {profile_error}")
+            user_data = {
+                "id": response.user.id,
+                "email": response.user.email
+            }
         
         if not response.session:
+            print("No session - email confirmation required")
             return MessageResponse(
                 message="Account created! Please check your email to confirm.",
                 success=True
             )
         
+        print("Returning auth response with tokens")
         return AuthResponse(
             access_token=response.session.access_token,
             refresh_token=response.session.refresh_token,
             expires_in=response.session.expires_in or 3600,
-            user=profile.data if profile.data else {
-                "id": response.user.id,
-                "email": response.user.email
-            }
+            user=user_data
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"ERROR: {type(e).__name__}: {str(e)}")  # This is key
         error_msg = str(e)
         if "already registered" in error_msg.lower():
             raise HTTPException(
@@ -53,7 +64,7 @@ async def signup(credentials: SignUpRequest):
             )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error_msg
+            detail=str(e)
         )
 
 
