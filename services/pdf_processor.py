@@ -137,53 +137,122 @@ class PDFProcessor:
         text_data: List[Dict]
     ):
         """
-        Write text with font support from text_data
+        Write text on page - BULLETPROOF with auto-restore from Supabase
         
         Args:
             text_data: [{"x": 10, "y": 20, "text": "...", "size": 30, "align": "top", "font": "arial"}]
         """
+        # 1. Ensure input file exists - restore from Supabase if needed
         input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+        
+        if not os.path.exists(input_path):
+            print(f"⚠️  Page {page_num} not found locally - attempting Supabase restore...")
+            
+            try:
+                # Get session info from database
+                session_data = self.supabase.table("pdf_sessions").select("*").eq(
+                    "session_id", session_id
+                ).single().execute()
+                
+                if not session_data.data:
+                    raise FileNotFoundError(f"Session {session_id} not found in database")
+                
+                session = session_data.data
+                user_id = session["user_id"]
+                storage_path = session.get("storage_path")
+                
+                if not storage_path:
+                    raise FileNotFoundError(
+                        f"Session {session_id} has no storage_path - cannot restore"
+                    )
+                
+                # Restore session from Supabase
+                print(f"🔄 Restoring session from: {storage_path}")
+                self.restore_session_from_storage(session_id, user_id, storage_path)
+                
+                # Update session status back to processing
+                self.supabase.table("pdf_sessions").update({
+                    "status": "processing"
+                }).eq("session_id", session_id).execute()
+                
+                print(f"✅ Session restored successfully")
+                
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Failed to restore session {session_id} from Supabase: {str(e)}"
+                )
+        
+        # 2. Ensure output folder exists
         output_session = f"{self.OUTPUT_FOLDER}/{session_id}"
         os.makedirs(output_session, exist_ok=True)
         output_path = f"{output_session}/page_{page_num}_filled.png"
         
-        img = Image.open(input_path)
-        width, height = img.size
+        # 3. Load and process the image
+        try:
+            img = Image.open(input_path)
+            width, height = img.size
+            print(f"📄 Base image loaded: {width}x{height}px")
+        except Exception as e:
+            raise IOError(f"Failed to open page {page_num}: {str(e)}")
         
         cell_width = width / self.GRID_SIZE
         cell_height = height / self.GRID_SIZE
         
         draw = ImageDraw.Draw(img)
         
-        for item in text_data:
-            grid_x = item['x']
-            grid_y = item['y']
-            text = item['text']
-            font_size = item.get('size', 20)
-            alignment = item.get('align', 'top')
-            font_name = item.get('font', 'arial')  # 🔥 Get font from each item!
-            
-            pixel_x = int(grid_x * cell_width)
-            pixel_y = int(grid_y * cell_height)
-            
-            # Load font with priority order
-            font = self._load_font(session_id, font_name, font_size)
-            
-            # Adjust Y position based on alignment
-            if alignment == 'bottom':
-                adjusted_y = pixel_y - font_size
-            elif alignment == 'center':
-                adjusted_y = pixel_y - (font_size // 2)
-            else:
-                adjusted_y = pixel_y
-            
-            draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
-            print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [font: {font_name}, size: {font_size}, align: {alignment}]")
+        # 4. Write all text with error handling
+        successful_writes = 0
         
-        img.save(output_path)
-        print(f"Saved filled page: {output_path}")
-
-
+        for idx, item in enumerate(text_data, 1):
+            try:
+                # Validate required fields
+                if 'x' not in item or 'y' not in item or 'text' not in item:
+                    print(f"⚠️  Text {idx}: Missing required fields - skipping")
+                    continue
+                
+                grid_x = item['x']
+                grid_y = item['y']
+                text = item['text']
+                font_size = item.get('size', 20)
+                alignment = item.get('align', 'top')
+                font_name = item.get('font', 'arial')
+                
+                pixel_x = int(grid_x * cell_width)
+                pixel_y = int(grid_y * cell_height)
+                
+                # Load font with fallback
+                try:
+                    font = self._load_font(session_id, font_name, font_size)
+                except Exception as e:
+                    print(f"⚠️  Text {idx}: Font '{font_name}' failed, using default - {e}")
+                    font = ImageFont.load_default()
+                
+                # Adjust Y position based on alignment
+                if alignment == 'bottom':
+                    adjusted_y = pixel_y - font_size
+                elif alignment == 'center':
+                    adjusted_y = pixel_y - (font_size // 2)
+                else:
+                    adjusted_y = pixel_y
+                
+                draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
+                print(f"  ✅ Text {idx}: '{text}' at ({grid_x}, {grid_y}) [font: {font_name}, size: {font_size}, align: {alignment}]")
+                successful_writes += 1
+                
+            except Exception as e:
+                print(f"⚠️  Text {idx}: Failed to write - {e}")
+                continue
+        
+        # 5. Save the result
+        try:
+            img.save(output_path)
+            print(f"✅ Saved: {output_path} ({successful_writes}/{len(text_data)} texts written)")
+        except Exception as e:
+            raise IOError(f"Failed to save output: {str(e)}")
+        
+        if successful_writes == 0 and len(text_data) > 0:
+            raise RuntimeError(f"Failed to write any of the {len(text_data)} text items")
+    
     def _load_font(self, session_id: str, font_name: str, font_size: int):
         """
         Load font with fallback priority:
@@ -211,67 +280,168 @@ class PDFProcessor:
         except Exception as e:
             print(f"⚠️  Font load failed: {e}. Using default.")
             return ImageFont.load_default()
-    def add_images_to_page(
-        self,
-        session_id: str,
-        page_num: int,
-        image_data: List[Dict]
-    ):
+        
+    def add_images_to_page(self, session_id: str, page_number: int, image_data: List[Dict]):
         """
-        Add signature/stamp images to a page
-        
-        Args:
-            session_id: Session identifier
-            page_num: Page number
-            image_data: List of images [{"x": 25, "y": 16, "image_path": "...", "width": 200, "height": 60}]
+        Add images to page - BULLETPROOF with auto-restore from Supabase
         """
-        # Check if page already has text filled
-        output_session = f"{self.OUTPUT_FOLDER}/{session_id}"
-        os.makedirs(output_session, exist_ok=True)
+        # 1. Check if session exists locally, restore if needed
+        session_temp_path = f"{self.TEMP_FOLDER}/{session_id}"
         
-        input_path = f"{output_session}/page_{page_num}_filled.png"
-        if not os.path.exists(input_path):
-            input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+        if not os.path.exists(session_temp_path):
+            print(f"⚠️  Session not found locally - attempting Supabase restore...")
+            
+            try:
+                # Get session info from database
+                session_data = self.supabase.table("pdf_sessions").select("*").eq(
+                    "session_id", session_id
+                ).single().execute()
+                
+                if not session_data.data:
+                    raise FileNotFoundError(f"Session {session_id} not found in database")
+                
+                session = session_data.data
+                user_id = session["user_id"]
+                storage_path = session.get("storage_path")
+                
+                if not storage_path:
+                    raise FileNotFoundError(
+                        f"Session {session_id} has no storage_path - cannot restore"
+                    )
+                
+                # Restore session from Supabase
+                print(f"🔄 Restoring session from: {storage_path}")
+                self.restore_session_from_storage(session_id, user_id, storage_path)
+                
+                # Update session status back to processing
+                self.supabase.table("pdf_sessions").update({
+                    "status": "processing"
+                }).eq("session_id", session_id).execute()
+                
+                print(f"✅ Session restored successfully")
+                
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"Failed to restore session {session_id} from Supabase: {str(e)}"
+                )
         
-        output_path = f"{output_session}/page_{page_num}_filled.png"
+        # 2. Ensure output folder exists
+        output_folder = f"{self.OUTPUT_FOLDER}/{session_id}"
+        os.makedirs(output_folder, exist_ok=True)
         
-        img = Image.open(input_path)
-        width, height = img.size
+        # 3. Try to load the TEXT-FILLED page first, fallback to original
+        filled_path = f"{output_folder}/page_{page_number}_filled.png"
+        original_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_number}.png"
+        
+        if os.path.exists(filled_path):
+            input_path = filled_path
+            print(f"✅ Loading TEXT-FILLED page {page_number}")
+        elif os.path.exists(original_path):
+            input_path = original_path
+            print(f"⚠️  Loading ORIGINAL page {page_number} (no text yet)")
+        else:
+            raise FileNotFoundError(
+                f"Neither filled nor original page exists for page {page_number}. "
+                f"Session may have failed to restore properly."
+            )
+        
+        output_path = f"{output_folder}/page_{page_number}_filled.png"
+        
+        # 4. Load the base image with error handling
+        try:
+            img = Image.open(input_path)
+            width, height = img.size
+            print(f"📄 Base image loaded: {width}x{height}px")
+        except Exception as e:
+            raise IOError(f"Failed to open base image {input_path}: {str(e)}")
         
         cell_width = width / self.GRID_SIZE
         cell_height = height / self.GRID_SIZE
         
-        for item in image_data:
-            grid_x = item['x']
-            grid_y = item['y']
-            image_path = item['image_path']
-            
-            pixel_x = int(grid_x * cell_width)
-            pixel_y = int(grid_y * cell_height)
-            
-            # Load the image
-            overlay = Image.open(image_path)
-            
-            # Resize if dimensions provided
-            if 'width' in item and 'height' in item:
-                overlay = overlay.resize(
-                    (item['width'], item['height']), 
-                    Image.Resampling.LANCZOS
-                )
-            
-            # Paste with transparency support
-            if overlay.mode == 'RGBA':
-                img.paste(overlay, (pixel_x, pixel_y), overlay)
-            else:
-                img.paste(overlay, (pixel_x, pixel_y))
-            
-            print(f"  Placed '{os.path.basename(image_path)}' at ({grid_x}, {grid_y})")
+        # 5. Process each image with comprehensive error handling
+        successful_placements = 0
         
-        img.save(output_path)
-        print(f"Saved page with images: {output_path}")
+        for idx, item in enumerate(image_data, 1):
+            try:
+                # Validate required fields
+                if 'x' not in item or 'y' not in item or 'image_path' not in item:
+                    print(f"⚠️  Image {idx}: Missing required fields (x, y, or image_path) - skipping")
+                    continue
+                
+                grid_x = item['x']
+                grid_y = item['y']
+                image_path = item['image_path']
+                
+                # Validate image file exists
+                if not os.path.exists(image_path):
+                    print(f"⚠️  Image {idx}: File not found '{image_path}' - skipping")
+                    continue
+                
+                # Calculate pixel coordinates
+                pixel_x = int(grid_x * cell_width)
+                pixel_y = int(grid_y * cell_height)
+                
+                # Validate coordinates are within bounds
+                if pixel_x < 0 or pixel_y < 0 or pixel_x > width or pixel_y > height:
+                    print(f"⚠️  Image {idx}: Coordinates ({pixel_x}, {pixel_y}) out of bounds - skipping")
+                    continue
+                
+                # Load overlay image
+                try:
+                    overlay = Image.open(image_path)
+                    print(f"  📷 Loaded image: {os.path.basename(image_path)} ({overlay.size[0]}x{overlay.size[1]})")
+                except Exception as e:
+                    print(f"⚠️  Image {idx}: Failed to open '{image_path}': {e} - skipping")
+                    continue
+                
+                # Resize if dimensions provided
+                if 'width' in item and 'height' in item:
+                    try:
+                        target_width = int(item['width'])
+                        target_height = int(item['height'])
+                        
+                        if target_width > 0 and target_height > 0:
+                            overlay = overlay.resize(
+                                (target_width, target_height), 
+                                Image.Resampling.LANCZOS
+                            )
+                            print(f"  🔄 Resized to {target_width}x{target_height}")
+                        else:
+                            print(f"⚠️  Image {idx}: Invalid dimensions ({target_width}x{target_height}) - using original")
+                    except Exception as e:
+                        print(f"⚠️  Image {idx}: Resize failed: {e} - using original size")
+                
+                # Paste with transparency support
+                try:
+                    if overlay.mode == 'RGBA':
+                        img.paste(overlay, (pixel_x, pixel_y), overlay)
+                    else:
+                        img.paste(overlay, (pixel_x, pixel_y))
+                    
+                    print(f"  ✅ Image {idx} placed at grid ({grid_x}, {grid_y}) -> pixel ({pixel_x}, {pixel_y})")
+                    successful_placements += 1
+                    
+                except Exception as e:
+                    print(f"⚠️  Image {idx}: Paste failed: {e} - skipping")
+                    continue
+                    
+            except KeyError as e:
+                print(f"⚠️  Image {idx}: Missing required field: {e} - skipping")
+                continue
+            except Exception as e:
+                print(f"⚠️  Image {idx}: Unexpected error: {e} - skipping")
+                continue
+        
+        # 6. Save the result with error handling
+        try:
+            img.save(output_path)
+            print(f"✅ Saved: {output_path} ({successful_placements}/{len(image_data)} images placed)")
+        except Exception as e:
+            raise IOError(f"Failed to save output image to {output_path}: {str(e)}")
+        
+        if successful_placements == 0 and len(image_data) > 0:
+            raise RuntimeError(f"Failed to place any of the {len(image_data)} images. Check logs for details.")
     
-    # services/pdf_processor.py
-
     def upload_to_storage(self, local_path: str, storage_path: str) -> str:
         """
         Upload to PRIVATE bucket and return signed URL
