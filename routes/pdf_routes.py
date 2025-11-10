@@ -821,14 +821,11 @@ async def download_pdf(
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    if session["status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"PDF not ready (status: {session['status']})"
-        )
-    
     if not session.get("storage_path"):
-        raise HTTPException(status_code=404, detail="PDF not found")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Completed PDF not found in storage (Current status: {session['status']})."
+        )
     
     try:
         def _create_signed_url():
@@ -842,7 +839,7 @@ async def download_pdf(
                 "download_count": session.get("download_count", 0) + 1,
                 "last_downloaded_at": datetime.now().isoformat()
             }).eq("session_id", session_id).execute()
-        
+
         signed_url, _ = await asyncio.gather(
             run_async(_create_signed_url),
             run_async(_update_download_count)
