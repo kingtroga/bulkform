@@ -498,6 +498,75 @@ async def generate_pdf(
         )
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
+# ============================================================================
+# GET ORIGINAL PDF FOR TEMPLATE CREATION
+# ============================================================================
+
+@router.get("/get-original/{session_id}")
+async def get_original_pdf(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves the original PDF file (before any filling) for template creation.
+    
+    This is necessary because the template API requires the file object, 
+    and the client needs to re-upload it via multipart/form-data.
+    """
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    # Define paths
+    user_id = current_user['id']
+    local_pdf_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}/original.pdf"
+    
+    # CRITICAL: Use the specified storage path convention
+    original_storage_path = f"{user_id}/{session_id}/original.pdf"
+    
+    try:
+        # 1. Check if the file still exists locally (best case)
+        if os.path.exists(local_pdf_path):
+            return FileResponse(
+                local_pdf_path,
+                media_type="application/pdf",
+                filename=session["filename"]
+            )
+        
+        # 2. If not local, restore it from Supabase Storage
+        elif session.get("storage_path"):
+            
+            print(f"⚠️ Restoring original PDF from storage: {original_storage_path}")
+
+            # ⚡ ASYNC: Download file from storage to temp folder
+            await run_async(
+                pdf_processor.download_file_from_storage,
+                original_storage_path,
+                local_pdf_path
+            )
+
+            # ⚡ ASYNC: Update session status back to processing after restoration
+            await run_async(
+                session_service.update_session_status,
+                session_id,
+                "processing"
+            )
+            
+            # Now serve the newly downloaded file
+            return FileResponse(
+                local_pdf_path,
+                media_type="application/pdf",
+                filename=session["filename"]
+            )
+
+        raise HTTPException(status_code=404, detail="Original PDF not found in session storage.")
+
+    except HTTPException:
+        # Re-raise 403/404 errors
+        raise
+    except Exception as e:
+        print(f"Error fetching original PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve original PDF: {str(e)}") 
 
 # ============================================================================
 # BATCH OPERATIONS (PARALLEL!)

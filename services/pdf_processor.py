@@ -649,3 +649,36 @@ class PDFProcessor:
         img.save(output_path)
         print(f"Applied grid to page {page_num}")
         return output_path
+    
+    def download_file_from_storage(self, storage_path: str, local_path: str):
+        """
+        Downloads a file from the configured Supabase Storage bucket 
+        to a specified local path.
+
+        Args:
+            storage_path: The path of the file in the Supabase bucket (e.g., 'user_id/session_id/original.pdf').
+            local_path: The full path where the file should be saved locally.
+        
+        Raises:
+            Exception: If the download from Supabase fails.
+        """
+        print(f"⬇️ Downloading from storage: {storage_path} to {local_path}")
+        try:
+            # 1. Download file content from Supabase
+            response = self.supabase.storage.from_(self.STORAGE_BUCKET).download(
+                path=storage_path
+            )
+            
+            # 2. Ensure the local directory exists before writing
+            local_dir = os.path.dirname(local_path)
+            os.makedirs(local_dir, exist_ok=True)
+            
+            # 3. Write the downloaded content (bytes) to the local file
+            with open(local_path, 'wb') as f:
+                f.write(response)
+            
+            print(f"✅ Successfully downloaded {storage_path}")
+
+        except Exception as e:
+            # Supabase download often returns an HTTP error within the Exception message
+            raise Exception(f"Supabase download failed for {storage_path}: {str(e)}")
