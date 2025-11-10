@@ -140,12 +140,15 @@ class TemplateService:
             List of template dictionaries, newest first
         """
         try:
-            # Query user's templates, ordered by newest first
-            result = self.supabase.table(self.table_name).select("*").eq(
+            query = self.supabase.table(self.table_name).select("*").eq(
                 "user_id", user_id
+            ).eq(
+                "is_official", False
             ).order(
                 "created_at", desc=True
-            ).limit(limit).offset(offset).execute()
+            ).limit(limit).offset(offset)
+            
+            result = query.execute()
             
             templates = result.data if result.data else []
             
@@ -317,7 +320,9 @@ class TemplateService:
         try:
             result = self.supabase.table(self.table_name).select(
                 "id", count="exact"
-            ).eq("user_id", user_id).execute()
+            ).eq("user_id", user_id).eq(
+                "is_official", False 
+            ).execute()
             
             return result.count if result.count else 0
         
