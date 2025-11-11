@@ -17,6 +17,7 @@ Endpoints:
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile
 from typing import Optional
+import os
 from models.template_models import (
     CreateTemplateRequest,
     UpdateTemplateRequest,
@@ -31,12 +32,121 @@ from models.template_models import (
 )
 from services.template_service import get_template_service
 from services.auth import get_current_user
+from services.pdf_processor import PDFProcessor # Assuming PDFProcessor is available
+from utils.utils import run_async 
+from starlette.responses import FileResponse # <-- NEW: For serving the image file
+from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter(prefix="/api/templates", tags=["Templates"])
 
 # Initialize service
 template_service = get_template_service()
 
+# Initialize PDF Processor outside endpoints
+pdf_processor = PDFProcessor()
+
+def generate_template_preview_sync(template_id: str, pdf_url: str, temp_dir: str) -> str:
+    """
+    Blocking function executed in a separate thread.
+    1. Downloads the PDF from Supabase Storage.
+    2. Converts the first page to a PNG thumbnail.
+    3. Returns the path to the generated image.
+    """
+    # 📝 Note: temp_dir is the full desired folder path (e.g., 'temp_pdf_uploads/template_previews/{id}')
+    # The session_id used by pdf_to_images must represent the sub-folder name.
+    
+    # Extract the necessary sub-folder name from the full temp_dir path
+    # Example: If temp_dir is 'temp_pdf_uploads/template_previews/b1f6...', 
+    # the target_session_id is 'template_previews/b1f6...'
+    target_session_id = f"template_previews/{template_id}"
+    
+    local_pdf_path = f"{temp_dir}/{template_id}_original.pdf"
+    preview_path = f"{temp_dir}/page_1.png"
+
+    try:
+        # Create the temp directory structure needed for download and final output
+        os.makedirs(temp_dir, exist_ok=True) 
+
+        # 1. Download PDF from storage (blocking I/O)
+        pdf_processor.download_pdf_from_storage(
+            pdf_url,
+            local_pdf_path
+        )
+
+        # 2. Convert first page to image (FIXED: Removed 'output_dir', Adjusted session_id)
+        # pdf_to_images creates its output folder based on session_id: 
+        # {self.TEMP_FOLDER}/{session_id}
+        pdf_processor.pdf_to_images(
+            pdf_path=local_pdf_path,
+            session_id=target_session_id, # <--- PASS THE CORRECT SUB-FOLDER STRUCTURE
+            page_numbers=[1],
+            # ❌ REMOVED: output_dir=temp_dir, 
+            # 📝 Rationale: This keyword is not supported and is now handled by session_id/self.TEMP_FOLDER logic.
+        )
+        
+        # 3. Check if the file was created.
+        if not os.path.exists(preview_path):
+            raise FileNotFoundError("PDF conversion failed to produce page 1 preview.")
+
+        return preview_path
+    
+    finally:
+        # Simple cleanup
+        if os.path.exists(local_pdf_path):
+            os.remove(local_pdf_path)
+
+
+# ============================================================================
+# PREVIEW ENDPOINT (FOR TEMPLATE CARDS)
+# ============================================================================
+
+@router.get("/preview/{template_id}/page/1")
+async def preview_template_page_one(
+    template_id: str
+):
+    """
+    Generates and returns the thumbnail (PNG) of the first page of a template.
+    
+    ✅ Public endpoint (Template previews are public)
+    
+    - Caches the generated image to ensure fast subsequent access.
+    """
+    temp_dir = f"{pdf_processor.TEMP_FOLDER}/template_previews/{template_id}"
+    preview_path = f"{temp_dir}/page_1.png"
+    
+    # 1. Check Cache
+    if os.path.exists(preview_path):
+        return FileResponse(preview_path, media_type="image/png")
+
+    try:
+        # 2. Get PDF URL from the template (must handle public access)
+        pdf_url = template_service.get_template_pdf_url(template_id)
+        if not pdf_url:
+            raise HTTPException(status_code=404, detail="Template or PDF URL not found")
+        
+        # 3. Generate preview asynchronously
+        await run_async(
+            generate_template_preview_sync,
+            template_id,
+            pdf_url,
+            temp_dir
+        )
+        
+        # 4. Serve the generated image
+        if not os.path.exists(preview_path):
+            raise Exception("Preview file was not successfully created.")
+
+        return FileResponse(preview_path, media_type="image/png")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log the error, but return a clean 500 error for the user
+        print(f"❌ Preview generation failed for {template_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to generate template preview. Try again later."
+        )
 
 # ============================================================================
 # CUSTOM TEMPLATE ENDPOINTS
@@ -410,40 +520,43 @@ async def delete_template(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Delete template
-    
-    🔒 Requires authentication
-    
-    Only the template owner can delete it.
-    Official templates cannot be deleted by regular users.
+    Soft-delete a template by setting active = false.
+    🔒 Requires authentication.
+    Only the owner can delete. Official templates are protected.
+    Idempotent: deleting an already-inactive template still returns 200.
     """
     try:
-        # Check if template is official
-        template_row = (
+        # Fetch template meta we need in one query
+        row = (
             template_service.supabase.table("pdf_templates")
-            .select("is_official")
+            .select("id,user_id,is_official,active")
             .eq("id", template_id)
             .single()
             .execute()
-        )
+        ).data
 
-        if template_row.data and template_row.data.get("is_official"):
+        if not row:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        if row["is_official"]:
             raise HTTPException(
                 status_code=403,
                 detail="Official templates cannot be deleted by regular users"
             )
 
-        success = template_service.delete_template(
-                template_id=template_id,
-                user_id=current_user['id']
-            )
+        if row["user_id"] != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not the owner")
+
+        # Soft delete via service (sets active = false)
+        success = template_service.soft_delete_template(
+            template_id=template_id,
+            user_id=current_user["id"]
+        )
 
         if not success:
-            raise HTTPException(
-                status_code=404,
-                detail="Template not found or unauthorized"
-            )
-
+            # If update matched zero rows, treat as not found/unauthorized
+            raise HTTPException(status_code=404, detail="Template not found or unauthorized")
+        
         return TemplateDeletedResponse(
             message="Template deleted successfully",
             template_id=template_id

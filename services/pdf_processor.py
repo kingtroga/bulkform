@@ -8,7 +8,7 @@ import img2pdf
 import os
 from pathlib import Path
 import shutil
-from typing import List, Dict
+from typing import List, Dict, Optional
 from services.supabase_client import get_supabase
 
 
@@ -82,28 +82,59 @@ class PDFProcessor:
                 if os.path.exists(folder):
                     shutil.rmtree(folder)
     
-    def pdf_to_images(self, pdf_path: str, session_id: str) -> int:
+    def pdf_to_images(
+        self, 
+        pdf_path: str, 
+        session_id: str, 
+        page_numbers: Optional[List[int]] = None
+    ) -> int:
         """
-        Convert PDF pages to images
+        Convert PDF pages to images.
         
         Args:
-            pdf_path: Path to PDF file
-            session_id: Unique session identifier
+            pdf_path: Path to PDF file.
+            session_id: Unique session identifier (used for output folder naming).
+            page_numbers: Optional list of pages to convert (1-indexed). Converts all if None.
             
         Returns:
-            Number of pages converted
+            Number of pages converted.
         """
-        print(f"Converting PDF to images (session: {session_id})...")
-        images = convert_from_path(pdf_path, dpi=self.DPI)
+        
+        # Determine conversion parameters
+        first_page = page_numbers[0] if page_numbers else 1
+        last_page = page_numbers[-1] if page_numbers else None
+        
+        print(f"Converting PDF to images (session: {session_id}, pages: {page_numbers if page_numbers else 'ALL'})...")
+        
+        try:
+            # Use pdf2image's first_page and last_page parameters for efficiency
+            images = convert_from_path(
+                pdf_path, 
+                dpi=self.DPI,
+                first_page=first_page,
+                last_page=last_page
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert PDF to image: {e}")
         
         session_folder = f"{self.TEMP_FOLDER}/{session_id}"
         os.makedirs(session_folder, exist_ok=True)
         
-        for idx, img in enumerate(images, 1):
-            img.save(f"{session_folder}/page_{idx}.png")
+        converted_count = 0
         
-        print(f"Converted {len(images)} page(s)")
-        return len(images)
+        # If specific page numbers were requested, we need to map the list index back to the page number
+        if page_numbers:
+            page_map = page_numbers
+        else:
+            page_map = list(range(1, len(images) + 1))
+            
+        for idx, img in enumerate(images):
+            page_num = page_map[idx]
+            img.save(f"{session_folder}/page_{page_num}.png")
+            converted_count += 1
+        
+        print(f"Converted {converted_count} page(s)")
+        return converted_count
     
     def get_page_dimensions(self, session_id: str, page_num: int) -> Dict:
         """Get dimensions for a specific page"""
@@ -682,3 +713,38 @@ class PDFProcessor:
         except Exception as e:
             # Supabase download often returns an HTTP error within the Exception message
             raise Exception(f"Supabase download failed for {storage_path}: {str(e)}")
+        
+    def download_pdf_from_storage(self, storage_path: str, local_path: str):
+        """
+        Downloads a PDF file from the configured Supabase Storage bucket 
+        to a specified local path. (This method is correctly named to resolve your AttributeError).
+
+        Args:
+            storage_path: The path of the file in the Supabase bucket (e.g., 'templates/user_id/id.pdf').
+            local_path: The full path where the file should be saved locally (e.g., '/tmp/temp_file.pdf').
+        
+        Raises:
+            Exception: If the download from Supabase fails.
+        """
+        print(f"⬇️ Downloading PDF from storage: {storage_path} to {local_path}")
+        try:
+            # 1. Download file content from Supabase
+            # Note: This client respects RLS, so it requires an authenticated token 
+            # (or admin client, as discussed) in the request context to succeed.
+            response = self.supabase.storage.from_(self.STORAGE_BUCKET).download(
+                path=storage_path
+            )
+            
+            # 2. Ensure the local directory exists before writing
+            local_dir = os.path.dirname(local_path)
+            os.makedirs(local_dir, exist_ok=True)
+            
+            # 3. Write the downloaded content (bytes) to the local file
+            with open(local_path, 'wb') as f:
+                f.write(response)
+            
+            print(f"✅ Successfully downloaded PDF {storage_path}")
+
+        except Exception as e:
+            # Re-raise with descriptive error message
+            raise Exception(f"Supabase PDF download failed for {storage_path}: {str(e)}")
