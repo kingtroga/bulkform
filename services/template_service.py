@@ -7,7 +7,7 @@ Templates allow users to:
 2. Reuse for multiple clients
 3. Save massive time on repetitive forms
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import uuid
 from datetime import datetime
 from services.supabase_client import get_supabase
@@ -629,6 +629,67 @@ class TemplateService:
         except Exception as e:
             print(f"❌ Failed to soft-delete template: {str(e)}")
             return False
+        
+    def list_templates_paged(
+        self, user_id: str, page: int = 1, page_size: int = 24
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Paged custom templates (active only).
+        Returns (items, total_count)
+        """
+        try:
+            page = max(1, page)
+            page_size = max(1, min(page_size, 100))
+            start = (page - 1) * page_size
+            end = start + page_size - 1
+
+            q = (
+                self.supabase.table(self.table_name)
+                .select("*", count="exact")
+                .eq("user_id", user_id)
+                .eq("is_official", False)
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .range(start, end)
+            )
+            res = q.execute()
+            items = res.data or []
+            total = res.count or 0
+            return items, total
+        except Exception as e:
+            print(f"❌ Failed to list custom templates (paged): {e}")
+            return [], 0
+
+    def list_official_templates_paged(
+        self, page: int = 1, page_size: int = 24, category: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Paged official templates (active only).
+        Returns (items, total_count)
+        """
+        try:
+            page = max(1, page)
+            page_size = max(1, min(page_size, 100))
+            start = (page - 1) * page_size
+            end = start + page_size - 1
+
+            q = (
+                self.supabase.table(self.table_name)
+                .select("*", count="exact")
+                .eq("is_official", True)
+                .eq("active", True)
+            )
+            if category:
+                q = q.eq("category", category)
+
+            q = q.order("downloads", desc=True).range(start, end)
+            res = q.execute()
+            items = res.data or []
+            total = res.count or 0
+            return items, total
+        except Exception as e:
+            print(f"❌ Failed to list official templates (paged): {e}")
+            return [], 0
 
 
 # ============================================================================

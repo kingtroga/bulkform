@@ -134,19 +134,45 @@ class TemplateListResponse(BaseModel):
 
 
 class AllTemplatesResponse(BaseModel):
-    """Combined official + custom templates"""
+    # data
     official: List[TemplateResponse]
     custom: List[TemplateResponse]
-    total_official: int
-    total_custom: int
-    
+
+    # totals
+    total_official: int = Field(..., description="Total active official templates")
+    total_custom: int = Field(..., description="Total active custom templates for the user")
+
+    # official paging meta
+    page_official: int
+    page_size_official: int
+    total_pages_official: int
+    has_prev_official: bool
+    has_next_official: bool
+
+    # custom paging meta
+    page_custom: int
+    page_size_custom: int
+    total_pages_custom: int
+    has_prev_custom: bool
+    has_next_custom: bool
+
     class Config:
         json_schema_extra = {
             "example": {
-                "official": [{"id": "off-1", "name": "I-485", "is_official": True}],
-                "custom": [{"id": "cust-1", "name": "My Template", "is_official": False}],
-                "total_official": 1,
-                "total_custom": 1
+                "official": [],
+                "custom": [],
+                "total_official": 120,
+                "total_custom": 37,
+                "page_official": 1,
+                "page_size_official": 24,
+                "total_pages_official": 5,
+                "has_prev_official": False,
+                "has_next_official": True,
+                "page_custom": 1,
+                "page_size_custom": 24,
+                "total_pages_custom": 2,
+                "has_prev_custom": False,
+                "has_next_custom": True,
             }
         }
 

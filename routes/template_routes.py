@@ -301,33 +301,68 @@ async def list_templates(
 
 @router.get("/all", response_model=AllTemplatesResponse)
 async def list_all_templates(
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    # Official pagination + optional filter
+    page_official: int = 1,
+    page_size_official: int = 24,
+    category: Optional[str] = None,
+    # Custom pagination
+    page_custom: int = 1,
+    page_size_custom: int = 24,
 ):
     """
-    List ALL templates (official + user's custom)
-    
-    🔒 Requires authentication
-    
-    Returns:
-    - **official**: All official BulkForm templates (public)
-    - **custom**: User's custom templates (private)
+    Paginated list of:
+      - official (public, active)
+      - user's custom (private, active)
     """
     try:
-        result = template_service.list_all_templates(
-            user_id=current_user['id'],
-            include_official=True
+        # Official
+        official_items, official_total = template_service.list_official_templates_paged(
+            page=page_official,
+            page_size=page_size_official,
+            category=category,
         )
-        
-        official_responses = [TemplateResponse(**t) for t in result['official']]
-        custom_responses = [TemplateResponse(**t) for t in result['custom']]
-        
+        # Custom
+        custom_items, custom_total = template_service.list_templates_paged(
+            user_id=current_user["id"],
+            page=page_custom,
+            page_size=page_size_custom,
+        )
+
+        official = [TemplateResponse(**t) for t in official_items]
+        custom   = [TemplateResponse(**t) for t in custom_items]
+
+        # meta
+        total_pages_official = (official_total + page_size_official - 1) // page_size_official if page_size_official else 0
+        total_pages_custom   = (custom_total   + page_size_custom   - 1) // page_size_custom if page_size_custom else 0
+
+        has_prev_official = page_official > 1
+        has_next_official = page_official < max(1, total_pages_official)
+
+        has_prev_custom = page_custom > 1
+        has_next_custom = page_custom < max(1, total_pages_custom)
+
         return AllTemplatesResponse(
-            official=official_responses,
-            custom=custom_responses,
-            total_official=len(official_responses),
-            total_custom=len(custom_responses)
+            # data
+            official=official,
+            custom=custom,
+            # totals
+            total_official=official_total,
+            total_custom=custom_total,
+            # official meta
+            page_official=page_official,
+            page_size_official=page_size_official,
+            total_pages_official=total_pages_official,
+            has_prev_official=has_prev_official,
+            has_next_official=has_next_official,
+            # custom meta
+            page_custom=page_custom,
+            page_size_custom=page_size_custom,
+            total_pages_custom=total_pages_custom,
+            has_prev_custom=has_prev_custom,
+            has_next_custom=has_next_custom,
         )
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
 
