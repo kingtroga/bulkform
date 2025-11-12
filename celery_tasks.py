@@ -21,7 +21,7 @@ from utils.storage_utils import download_with_retries
 import httpx
 import zipfile
 
-
+ZIP_TTL_SECONDS = 5 * 60 * 60  # 5 hours
 
 # ============================================================================
 # CLEANUP UTILITIES
@@ -143,6 +143,7 @@ def create_streaming_zip_sync(
         print(f"📤 Uploading {zip_size} bytes to Supabase...")
         
         zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
+        cleanup_zip_task.apply_async(args=[user_id, batch_id, zip_storage_path], countdown=ZIP_TTL_SECONDS)
         
         with open(zip_path, 'rb') as f:
             pdf_processor.supabase.storage.from_(
@@ -701,6 +702,11 @@ async def create_batch_zip(
         ).create_signed_url(zip_storage_path, 3600)
         
         zip_url = signed_url_response['signedURL']
+        cleanup_zip_task.apply_async(
+            args=[user_id, batch_id, zip_storage_path],
+            countdown=ZIP_TTL_SECONDS
+        )
+
         
         print(f"✅ Zip created successfully!")
         print(f"✅ URL: {zip_url[:80]}...")
@@ -717,6 +723,49 @@ async def create_batch_zip(
             print(f"🧹 Cleaning up temp file: {zip_path}")
             os.unlink(zip_path)
 
+
+@celery_app.task(
+    name='celery_tasks.cleanup_zip',
+    bind=True,
+    max_retries=3,               # retry if transient error
+    default_retry_delay=60       # 1 min between retries
+)
+def cleanup_zip_task(self, user_id: str, batch_id: str, zip_storage_path: str):
+    """
+    Deletes the generated ZIP from Supabase after TTL and clears download_url.
+    Idempotent: safe to run multiple times.
+    """
+    try:
+        print(f"\n🧹 Cleanup ZIP for batch={batch_id}")
+        pdf_processor = PDFProcessor()
+        supa = pdf_processor.supabase
+        bucket = pdf_processor.STORAGE_BUCKET
+
+        # 1) Delete the zip from storage (idempotent remove)
+        try:
+            # Supabase-py uses remove([...]) for storage deletes
+            supa.storage.from_(bucket).remove([zip_storage_path])
+            print(f"✅ Removed from storage: {bucket}/{zip_storage_path}")
+        except Exception as e:
+            # If already removed, log and continue
+            print(f"⚠️  Storage remove warning ({zip_storage_path}): {e}")
+
+        # 2) Clear the download_url on the batch job
+        batch_service = get_batch_service()
+        # update_batch_status only sets provided keys; to clear, do a direct update:
+        try:
+            batch_service.supabase.table(batch_service.batch_table).update({
+                "download_url": None
+            }).eq("id", batch_id).execute()
+            print(f"✅ Cleared download_url for batch {batch_id}")
+        except Exception as e:
+            print(f"⚠️  Failed to clear download_url for {batch_id}: {e}")
+
+        print(f"🧹 Cleanup complete for batch={batch_id}")
+
+    except Exception as e:
+        print(f"❌ cleanup_zip_task error: {e}")
+        raise self.retry(exc=e)
 
 
 
