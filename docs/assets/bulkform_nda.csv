@@ -1,3 +1,3 @@
-Name,Name_font,Name_size,address,address_font,address_size,date_year,date_year_font,date_year_size,Name_again,Name_again_font,Name_again_size,Complete_date,Complete_date_font,Complete_date_size,date_month_day,date_month_day_font,date_month_day_size,your_signature,your_signature_font,your_signature_size
-YEKOROGHA Ayebatariwalate,arial,30,16 Providence Close Coker Estate Shasha Lagos,arial,30,25,arial,30,YEKOROGHA Ayebatariwalate,arial,30,5th November 2025,arial,30,5th November,arial,30,signature,arial,30
-Olubayo Tiola,arial,30,Abeokuta,arial,30,25,arial,30,Olubayo Tiola,arial,30,5th November 2025,arial,30,5th November,arial,30,signature,arial,30
+date_yy,date_dd_mm,name,signature_2,signature_1,full_name,full_date,address,font,size,align,name_font,name_size,name_align,full_name_font,full_name_size,full_name_align,address_font,address_size,address_align,signature_1_width,signature_1_height,signature_2_width,signature_2_height
+25,12-11,John Doe,signature,signature,Johnathan Doe,2025-11-12,Anywhere,arial,96,center,Courier,128,top,Times,150,bottom,Helvetica,72,top,2000,1000,2500,1200
+24,10-10,Jane Smith,signature,signature,Janet Smith,2024-10-10,Anywhere,arial,88,bottom,Helvetica,140,center,Arial Black,160,top,Times,64,bottom,1800,900,2200,1100

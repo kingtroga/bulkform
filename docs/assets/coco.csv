@@ -1,0 +1,5 @@
+date_yy,date_dd_mm,name,signature_1,signature_2,full_name,full_date,address,signature_1_width,signature_1_height,signature_2_width,signature_2_height,__image_width__,__image_height__
+25,12-11,John Doe,signature,signature,Johnathan Doe,2025-11-12,Anywhere,3000,1500,1200,600,4000,2000
+24,10-10,Jane Smith,signature,signature,Janet Smith,2024-10-10,Anywhere,100,50,6000,2500,800,400
+23,09-09,Mark Wilson,signature,signature,Mark W.,2023-09-09,Anywhere,,,,5000,3000,200,100
+22,08-08,Lucy James,signature,signature,Lucy J.,2022-08-08,Anywhere,8000,4000,8000,4000,9000,4500

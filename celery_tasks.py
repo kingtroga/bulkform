@@ -174,13 +174,98 @@ def create_streaming_zip_sync(
 # ============================================================================
 # FIELD DATA BUILDER
 # ============================================================================
+def resolve_text_style(field_name: str, client_data: Dict, field_config: Dict, batch_options: Dict):
+    """
+    Precedence:
+    1) per-field (row):   <field>_font, <field>_size, <field>_align
+    2) per-row (global):  __font__, __size__, __align__  (also accept legacy 'font','size','align')
+    3) batch defaults:    options.default_font/size/align
+    4) template defaults: field_config.font/size/align
+    5) hard defaults:     arial / 12 / 'center'
+    """
+    pf_font  = client_data.get(f"{field_name}_font")
+    pf_size  = client_data.get(f"{field_name}_size")
+    pf_align = client_data.get(f"{field_name}_align")
 
-def build_field_data(field_mappings: Dict, client_data: Dict, image_service, user_id: str, temp_image_paths: list):
+    row_font  = client_data.get("__font__")  or client_data.get("font")
+    row_size  = client_data.get("__size__")  or client_data.get("size")
+    row_align = client_data.get("__align__") or client_data.get("align")
+
+    b_font  = batch_options.get("default_font")
+    b_size  = batch_options.get("default_size")
+    b_align = batch_options.get("default_align")
+
+    t_font  = field_config.get("font", "arial")
+    t_size  = field_config.get("size", 12)
+    t_align = field_config.get("align", "center")
+
+    font  = pf_font or row_font or b_font or t_font or "arial"
+    try:
+        size = int(pf_size or row_size or b_size or t_size or 12)
+    except (TypeError, ValueError):
+        size = 12
+
+    align = (pf_align or row_align or b_align or t_align or "center")
+    align = str(align).lower()
+    # tolerate old values; normalize to allowed set
+    if align not in ("top", "center", "bottom"):
+        align = "left"
+    return font, size, align
+
+
+def resolve_image_dims(field_name: str, client_data: Dict, field_config: Dict, batch_options: Dict):
+    """
+    Precedence:
+    1) per-field (row): <field>_width, <field>_height | <field>__width/__height | <field>_w/_h
+    2) per-row (global): __image_width__, __image_height__
+    3) batch defaults: options.image_defaults.width/height OR default_image_width/height
+    4) template defaults: field_config.width/height
+    5) hard defaults: 200 x 60
+    """
+    def pick(*keys):
+        for k in keys:
+            if k in client_data and client_data[k] not in (None, ""):
+                return client_data[k]
+        return None
+
+    # tolerate common header variants from CSV
+    pf_w = pick(f"{field_name}_width", f"{field_name}__width", f"{field_name}_w")
+    pf_h = pick(f"{field_name}_height", f"{field_name}__height", f"{field_name}_h")
+
+    row_w = client_data.get("__image_width__")
+    row_h = client_data.get("__image_height__")
+
+    img_defaults = (batch_options.get("image_defaults") or {})
+    b_w = batch_options.get("default_image_width")  or img_defaults.get("width")
+    b_h = batch_options.get("default_image_height") or img_defaults.get("height")
+
+    t_w = field_config.get("width")
+    t_h = field_config.get("height")
+
+    def to_int(v, fallback):
+        try:
+            # handle " 300 ", "300.0", etc.
+            return int(float(str(v).strip()))
+        except Exception:
+            return fallback
+
+    width  = to_int(pf_w or row_w or b_w or t_w, 200)
+    height = to_int(pf_h or row_h or b_h or t_h, 60)
+
+    print(f"     - resolve_image_dims[{field_name}] -> width={width}, height={height}")
+    return width, height
+
+
+
+
+def build_field_data(field_mappings: Dict, client_data: Dict, image_service, user_id: str, temp_image_paths: list, batch_options: Dict = None):
     """Build pages_data and images_data from field mappings and client data"""
+    client_data = {str(k).strip(): v for k, v in client_data.items()}
     pages_data = {}
     images_data = {}
     text_field_count = 0
     image_field_count = 0
+    batch_options = batch_options or {}
 
     print(f"🧭 Iterating field_mappings...")
     for field_name, field_config in field_mappings.items():
@@ -198,14 +283,15 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
                     
                     if page not in images_data:
                         images_data[page] = []
-                    
+                    w, h = resolve_image_dims(field_name, client_data, field_config, batch_options)
                     entry = {
                         'image_path': image_path,
                         'x': field_config['x'],
                         'y': field_config['y'],
-                        'width': field_config.get('width', 200),
-                        'height': field_config.get('height', 60)
+                        'width': w,
+                        'height': h
                     }
+                    print(f"     - IMAGE entry for '{field_name}': x={field_config['x']} y={field_config['y']} width={w} height={h}")
                     images_data[page].append(entry)
                     image_field_count += 1
                     print(f"     - Queued image placement: {entry}")
@@ -226,7 +312,9 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
             value = handle_checkbox(value, field_config)
 
         # Font & size resolution
-        font_value, size_value = resolve_font_and_size(field_name, client_data, field_config)
+        font_value, size_value, align_value = resolve_text_style(
+            field_name, client_data, field_config, batch_options
+            )
 
         value = str(value) if value is not None else ''
         entry = {
@@ -235,7 +323,7 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
             'y': field_config['y'],
             'size': size_value,
             'font': font_value,
-            'align': field_config.get('align', 'left')
+            'align': align_value,
         }
 
         pages_data[page].append(entry)
@@ -313,11 +401,13 @@ def fill_single_pdf_sync(
     client_data: dict,
     user_id: str,
     batch_id: str,
-    item_index: int
+    item_index: int,
+    batch_options: Dict = None
 ) -> Dict[str, str]:
     """Fill a single PDF with text AND images — with verbose logs"""
     print("\n" + "=" * 80)
     print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index} user_id={user_id}")
+    batch_options = batch_options or {}
     
     pdf_processor = PDFProcessor()
     image_service = get_image_service()
@@ -391,7 +481,8 @@ def fill_single_pdf_sync(
             client_data,
             image_service,
             user_id,
-            temp_image_paths
+            temp_image_paths,
+            batch_options=batch_options
         )
 
         # Step 5: Fill text fields
@@ -665,7 +756,8 @@ def process_single_pdf_task(
         batch_service = get_batch_service()
         template_service = get_template_service()
         
-        # Mark as processing
+        batch = batch_service.get_batch(batch_id, user_id) or {}
+        batch_options = (batch.get("options") or {})
         batch_service.update_batch_item(item_id, "processing")
         
         # Get template
@@ -680,7 +772,8 @@ def process_single_pdf_task(
             client_data=client_data,
             user_id=user_id,
             batch_id=batch_id,
-            item_index=item_index
+            item_index=item_index,
+            batch_options=batch_options,
         )
         pdf_time = time.time() - pdf_start
         

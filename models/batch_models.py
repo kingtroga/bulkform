@@ -51,6 +51,7 @@ class BatchCreatedResponse(BaseModel):
     batch_name: str = Field(..., description="Name of batch")
     total_items: int = Field(..., description="Number of items in batch")
     status: str = Field(..., description="Initial status (pending)")
+    options: Dict = {}
     message: str = Field(..., description="Success message with next steps")
     
     class Config:

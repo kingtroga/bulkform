@@ -83,7 +83,8 @@ class BatchService:
         user_id: str,
         template_id: str,
         items: List[Dict[str, Any]],
-        batch_name: Optional[str] = None
+        batch_name: Optional[str] = None,
+        options: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Create a new batch job
@@ -116,7 +117,8 @@ class BatchService:
                 "total_items": len(items),
                 "completed": 0,
                 "failed": 0,
-                "status": "pending"
+                "status": "pending",
+                "options": options or {},
             }
             
             result = self.supabase.table(self.batch_table).insert(batch_data).execute()

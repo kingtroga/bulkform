@@ -425,6 +425,7 @@ class PDFProcessor:
                     print(f"⚠️  Image {idx}: Failed to open '{image_path}': {e} - skipping")
                     continue
                 
+                print(f"   🔎 Raw entry: {item}") 
                 # Resize if dimensions provided
                 if 'width' in item and 'height' in item:
                     try:

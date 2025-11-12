@@ -295,93 +295,134 @@ async def create_batch_from_csv(
     template_id: str = Form(..., description="Template UUID"),
     batch_name: str = Form(..., description="Batch name"),
     file: UploadFile = File(..., description="CSV/Excel file"),
-    current_user: dict = Depends(get_current_user)
+    # --- NEW: batch-wide defaults (optional) ---
+    default_font: str | None = Form(None, description="Batch default font"),
+    default_size: int | None = Form(None, description="Batch default font size"),
+    default_align: str | None = Form(None, description="Batch default align: center|top|bottom"),
+    default_image_width: int | None = Form(None, description="Batch default image width"),
+    default_image_height: int | None = Form(None, description="Batch default image height"),
+    current_user: dict = Depends(get_current_user),
 ):
     """
-    Upload CSV/Excel and create batch job
-    
-    🔒 Requires authentication
-    
-    **Complete workflow in one request:**
-    1. Upload CSV/Excel file
-    2. Parse and validate data
-    3. Create batch job in database
-    4. Ready to process!
-    
-    - **file**: CSV or Excel file with client data (max 10MB, max 1000 rows)
-    - **template_id**: Which template to use (UUID format)
-    - **batch_name**: Name for this batch (1-200 characters)
-    
-    Returns batch_id - use it to start processing with `/batch/{id}/process`
+    Upload CSV/Excel and create batch job with optional batch-wide defaults
+    (font/size/align + image width/height) stored in batch.options.
     """
     try:
         services = get_services()
-        
+
         # Validate file
         file_extension = validate_file_upload(file)
-        
-        # Validate template_id is UUID
+
+        # Validate template_id
         try:
             uuid.UUID(template_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="template_id must be a valid UUID")
-        
+
         # Validate batch_name
         if not batch_name or len(batch_name.strip()) == 0:
             raise HTTPException(status_code=400, detail="batch_name cannot be empty")
         if len(batch_name) > 200:
             raise HTTPException(status_code=400, detail="batch_name too long (max 200 characters)")
-        
-        # Get template to know required fields
+
+        # Get template (to derive required fields)
         template = services['template'].get_template(template_id, current_user['id'])
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
-        
+
         required_fields = list(template['field_mappings'].keys())
-        
+
         # Read file content
         file_content = await file.read()
-        
+
         # Check file size
         if len(file_content) > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=400,
                 detail=f"File too large. Maximum size: {MAX_FILE_SIZE / 1024 / 1024}MB"
             )
-        
-        # Parse CSV/Excel with BytesIO
+
+        # Parse CSV/Excel
         result = services['csv'].validate_and_parse(
             file_path=io.BytesIO(file_content),
             required_fields=required_fields,
             file_extension=file_extension,
             normalize=True
         )
-        
+
         if result['errors']:
             raise HTTPException(
                 status_code=400,
                 detail=f"CSV validation failed: {', '.join(result['errors'])}"
             )
-        
+
         # Validate batch size
         validate_batch_size(result['data'])
-        
-        # Create batch
+
+        # --- NEW: build batch.options safely ---
+        options: dict = {}
+
+        # Align normalization/validation
+        allowed_align = {"center", "top", "bottom"}
+        align_norm = None
+        if default_align is not None:
+            align_norm = str(default_align).strip().lower()
+            if align_norm not in allowed_align:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid default_align '{default_align}'. Allowed: {', '.join(sorted(allowed_align))}"
+                )
+
+        # Populate options only when provided (keeps payload clean)
+        if default_font:
+            options["default_font"] = default_font
+
+        if default_size is not None:
+            try:
+                options["default_size"] = int(default_size)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="default_size must be an integer")
+
+        if align_norm:
+            options["default_align"] = align_norm
+
+        image_defaults: dict = {}
+        if default_image_width is not None:
+            try:
+                image_defaults["width"] = int(default_image_width)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="default_image_width must be an integer")
+        if default_image_height is not None:
+            try:
+                image_defaults["height"] = int(default_image_height)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="default_image_height must be an integer")
+
+        if image_defaults:
+            # Preferred nested shape
+            options["image_defaults"] = image_defaults
+            # Optional compatibility keys (if you want both)
+            options["default_image_width"] = image_defaults.get("width")
+            options["default_image_height"] = image_defaults.get("height")
+
+        # Create batch (now includes options)
         batch_id = services['batch'].create_batch(
             user_id=current_user['id'],
             template_id=template_id,
             items=result['data'],
-            batch_name=batch_name.strip()
+            batch_name=batch_name.strip(),
+            options=options if options else {}  # safe empty dict if nothing provided
         )
-        
+
         return BatchCreatedResponse(
             batch_id=batch_id,
             batch_name=batch_name.strip(),
             total_items=result['row_count'],
             status="pending",
+            options=options,
             message=f"Batch created with {result['row_count']} items. Use POST /batch/{batch_id}/process to start."
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
