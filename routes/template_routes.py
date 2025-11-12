@@ -16,7 +16,7 @@ Endpoints:
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile
-from typing import Optional
+from typing import Optional, Dict, Any
 import os
 from models.template_models import (
     CreateTemplateRequest,
@@ -490,62 +490,84 @@ async def update_template(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Update existing template
-    
-    🔒 Requires authentication
-    
-    Only the template owner can update it.
-    Official templates cannot be updated by regular users.
-    
-    **Field mappings update:** Only updates the fields you provide, keeps existing ones intact.
+    Update existing template (partial):
+    - name, description, pdf_url, category
+    - field_mappings (merge/upsert)
+    - remove_fields (delete specific mappings)
     """
+    print(f"[UPDATE_TEMPLATE] user={current_user.get('id')} template_id={template_id} payload={request.dict(exclude_unset=True)}")
+
     try:
-        # Build updates dict (only include provided fields)
-        updates = {}
+        # 0) Load & guard
+        existing = template_service.get_template(template_id, current_user["id"])
+        if not existing:
+            print(f"[UPDATE_TEMPLATE] Template not found or unauthorized for user={current_user.get('id')}")
+            raise HTTPException(status_code=404, detail="Template not found or unauthorized")
+
+        if existing.get("is_official") and existing.get("user_id") != current_user["id"]:
+            print(f"[UPDATE_TEMPLATE] Forbidden edit attempt on official template={template_id} by user={current_user.get('id')}")
+            raise HTTPException(status_code=403, detail="Official templates cannot be edited")
+
+        updates: Dict[str, Any] = {}
+
+        # 1) Basic fields
         if request.name is not None:
-            updates['name'] = request.name
+            updates["name"] = request.name
         if request.description is not None:
-            updates['description'] = request.description
+            updates["description"] = request.description
         if request.pdf_url is not None:
-            updates['pdf_url'] = request.pdf_url
-        if request.field_mappings is not None:
-            # Get existing template
-            existing = template_service.get_template(template_id, current_user['id'])
-            if not existing:
-                raise HTTPException(status_code=404, detail="Template not found")
-            
-            # Merge field mappings (update only changed fields, keep existing ones)
-            existing_mappings = existing.get('field_mappings', {})
-            merged_mappings = {**existing_mappings, **request.field_mappings}
-            
-            # Validate merged field_mappings
-            if not template_service.validate_field_mappings(merged_mappings):
+            updates["pdf_url"] = request.pdf_url
+        if request.category is not None:
+            cat = (request.category or "").strip() or None
+            updates["category"] = cat
+        print(f"[UPDATE_TEMPLATE] Basic updates collected: {updates}")
+
+        # 2) Field mappings merge/delete
+        if request.field_mappings is not None or (request.remove_fields and len(request.remove_fields) > 0):
+            existing_mappings = dict(existing.get("field_mappings", {}))
+            print(f"[UPDATE_TEMPLATE] Existing mappings count={len(existing_mappings)}")
+
+            # deletions
+            for k in (request.remove_fields or []):
+                existing_mappings.pop(k, None)
+                print(f"[UPDATE_TEMPLATE] Removed mapping key={k}")
+
+            # upserts
+            for k, v in (request.field_mappings or {}).items():
+                existing_mappings[k] = v
+                print(f"[UPDATE_TEMPLATE] Upserted mapping key={k}")
+
+            if not template_service.validate_field_mappings(existing_mappings):
+                print(f"[UPDATE_TEMPLATE] Invalid field mappings detected for template={template_id}")
                 raise HTTPException(status_code=400, detail="Invalid field mappings")
-            
-            updates['field_mappings'] = merged_mappings
-        
+
+            updates["field_mappings"] = existing_mappings
+
         if not updates:
+            print(f"[UPDATE_TEMPLATE] No valid fields to update for template={template_id}")
             raise HTTPException(status_code=400, detail="No fields to update")
-        
-        success = template_service.update_template(
+
+        # 3) Persist
+        print(f"[UPDATE_TEMPLATE] Applying updates: {list(updates.keys())}")
+        updated_ok = template_service.update_template(
             template_id=template_id,
-            user_id=current_user['id'],
+            user_id=current_user["id"],
             updates=updates
         )
-        
-        if not success:
-            raise HTTPException(
-                status_code=404,
-                detail="Template not found or unauthorized"
-            )
-        
-        # Return updated template
-        updated = template_service.get_template(template_id, current_user['id'])
+
+        if not updated_ok:
+            print(f"[UPDATE_TEMPLATE] update_template() returned False for template={template_id}")
+            raise HTTPException(status_code=404, detail="Template not found or unauthorized")
+
+        updated = template_service.get_template(template_id, current_user["id"])
+        print(f"[UPDATE_TEMPLATE] Update successful template={template_id}")
         return TemplateResponse(**updated)
-    
-    except HTTPException:
+
+    except HTTPException as he:
+        print(f"[UPDATE_TEMPLATE] HTTPException status={he.status_code} detail={he.detail}")
         raise
     except Exception as e:
+        print(f"[UPDATE_TEMPLATE] Unexpected failure: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update template: {str(e)}")
 
 

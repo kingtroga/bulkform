@@ -131,7 +131,7 @@ class TemplateService:
                 print("⚠️  Cannot update - template not found/unauthorized/inactive")
                 return False
 
-            allowed_fields = {"name", "description", "pdf_url", "field_mappings"}
+            allowed_fields = {"name", "description", "pdf_url", "field_mappings", "category"}
             filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
             if not filtered_updates:
                 print("⚠️  No valid fields to update")

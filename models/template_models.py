@@ -33,7 +33,9 @@ class UpdateTemplateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=1000)
     pdf_url: Optional[str] = None
+    category: Optional[str] = Field(None, max_length=255)
     field_mappings: Optional[Dict[str, Any]] = None
+    remove_fields: Optional[List[str]] = None
     
     class Config:
         json_schema_extra = {
