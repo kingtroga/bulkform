@@ -6,6 +6,12 @@ from services.supabase_client import get_supabase
 from typing import Dict, Optional, List
 from datetime import datetime
 
+from services.session_cache import (
+    cache_user_sessions,
+    cache_session_count,
+    invalidate_user_sessions,
+)
+
 
 class SessionService:
     """Manages PDF processing sessions in Supabase database"""
@@ -39,8 +45,13 @@ class SessionService:
             "num_pages": num_pages,
             "status": "processing"
         }).execute()
+
+        data = result.data[0] if result.data else None
+
+        if data:
+            invalidate_user_sessions(user_id)
         
-        return result.data[0] if result.data else None
+        return data
     
     def get_session(self, session_id: str) -> Optional[Dict]:
         """Get session by session_id"""
@@ -86,21 +97,29 @@ class SessionService:
         
         return result.data[0] if result.data else None
     
-    def get_user_sessions(self, user_id: str, limit: int = 50) -> List[Dict]:
+    @cache_user_sessions(ttl=300)
+    def get_user_sessions(self, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict]:
         """Get all sessions for a user (newest first)"""
         result = self.supabase.table("pdf_sessions").select("*").eq(
             "user_id", user_id
-        ).order("created_at", desc=True).limit(limit).execute()
+        ).order("created_at", desc=True).limit(limit).offset(offset).execute()
         
         return result.data if result.data else []
     
     def delete_session(self, session_id: str) -> bool:
         """Delete session from database"""
+        session = self.get_session(session_id)
+
         result = self.supabase.table("pdf_sessions").delete().eq(
             "session_id", session_id
         ).execute()
+
+        success = bool(result.data)
+
+        if success and session and session.get("user_id"):
+            invalidate_user_sessions(session["user_id"])
         
-        return bool(result.data)
+        return success
     
     def cleanup_old_sessions(self, days_old: int = 7):
         """
@@ -115,3 +134,14 @@ class SessionService:
         ).execute()
         
         return len(result.data) if result.data else 0
+    
+    @cache_session_count(ttl=300)
+    def count_user_sessions(self, user_id: str) -> int:
+        result = self.supabase.table(
+            "pdf_sessions"
+            ).select(
+                "session_id", count="exact"
+                ).eq(
+                    "user_id", user_id
+                    ).execute() 
+        return result.count or 0

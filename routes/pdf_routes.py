@@ -5,7 +5,7 @@ PDF Routes - FULLY ASYNC OPTIMIZED (FIXED)
 ☁️  Supabase Storage for PDFs
 ⚡ TRUE ASYNC - No blocking, no pickle errors!
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
 from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
@@ -723,13 +723,33 @@ async def fill_text_batch_encrypted(
 # ============================================================================
 
 @router.get("/my-sessions", response_model=UserSessionsResponse)
-async def get_my_sessions(current_user: dict = Depends(get_current_user)):
-    """Get all PDF sessions for current user"""
+async def get_my_sessions(
+    current_user: dict = Depends(get_current_user),
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Get PDF sessions for current user (paginated).
+
+    - limit: page size
+    - offset: how many records to skip from the start
+    """
+    user_id = current_user["id"]
+
+    # 1) Get total count for this user
+    total_sessions = await run_async(
+        session_service.count_user_sessions,
+        user_id
+    )
+
+    # 2) Get only the slice we want for this page
     sessions = await run_async(
         session_service.get_user_sessions,
-        current_user['id']
+        user_id,
+        limit,
+        offset,
     )
-    
+
     session_infos = [
         SessionInfo(
             session_id=s["session_id"],
@@ -738,15 +758,17 @@ async def get_my_sessions(current_user: dict = Depends(get_current_user)):
             status=s["status"],
             storage_path=s.get("storage_path"),
             created_at=s["created_at"],
-            updated_at=s["updated_at"]
+            updated_at=s["updated_at"],
         )
         for s in sessions
     ]
-    
+
     return UserSessionsResponse(
-        user_id=current_user['id'],
-        total_sessions=len(session_infos),
-        sessions=session_infos
+        user_id=user_id,
+        total_sessions=total_sessions,  # total in DB, not just this page
+        limit=limit,
+        offset=offset,
+        sessions=session_infos,
     )
 
 

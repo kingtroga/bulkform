@@ -151,4 +151,6 @@ class UserSessionsResponse(BaseModel):
     """Response with user's sessions"""
     user_id: str
     total_sessions: int
+    limit: int                   
+    offset: int                  
     sessions: List[SessionInfo]
