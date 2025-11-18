@@ -6,7 +6,7 @@ Key Fix: Removed auto-status update from increment_batch_counters
 to prevent premature "completed" status while items are still processing.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import uuid
 from services.supabase_client import get_supabase
@@ -194,41 +194,42 @@ class BatchService:
         user_id: str,
         status: Optional[str] = None,
         limit: int = 50,
-        offset: int = 0
-    ) -> List[Dict[str, Any]]:
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
         """
-        List user's batch jobs
-        
-        Args:
-            user_id: UUID of user
-            status: Filter by status (optional)
-            limit: Max batches to return (default 50)
-            offset: Number to skip (for pagination)
-            
+        List user's batch jobs (paged) + total count.
+
         Returns:
-            List of batch dicts, newest first
+            (batches_page, total_count)
         """
         try:
-            query = self.supabase.table(self.batch_table).select("*").eq(
-                "user_id", user_id
+            # Supabase uses start/end indexes instead of offset/limit
+            start = offset
+            end = offset + limit - 1
+
+            q = (
+                self.supabase
+                .table(self.batch_table)
+                .select("*", count="exact")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
             )
-            
+
             if status:
-                query = query.eq("status", status)
-            
-            result = query.order(
-                "created_at", desc=True
-            ).limit(limit).offset(offset).execute()
-            
-            batches = result.data if result.data else []
-            
-            print(f"✅ Retrieved {len(batches)} batches for user")
-            
-            return batches
-        
+                q = q.eq("status", status)
+
+            res = q.range(start, end).execute()
+
+            batches = res.data or []
+            total = res.count or 0
+
+            print(f"✅ Retrieved {len(batches)} batches for user (total={total})")
+
+            return batches, total
+
         except Exception as e:
             print(f"❌ Failed to list batches: {str(e)}")
-            return []
+            return [], 0
     
     
     def update_batch_status(

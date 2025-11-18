@@ -558,7 +558,6 @@ async def process_batch(
 # ============================================================================
 # QUERY BATCH ENDPOINTS
 # ============================================================================
-
 @router.get("", response_model=BatchListResponse)
 async def list_batches(
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -567,32 +566,31 @@ async def list_batches(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    List user's batches
-    
-    🔒 Requires authentication
-    
-    Returns paginated list of user's batch jobs, newest first.
+    List user's batches (paginated, newest first)
     """
     try:
         services = get_services()
-        
-        batches = services['batch'].list_batches(
-            user_id=current_user['id'],
+        batch_service = services["batch"]
+
+        # NEW: service returns (rows_for_this_page, total_count)
+        batches, total = batch_service.list_batches(
+            user_id=current_user["id"],
             status=status,
             limit=limit,
-            offset=offset
+            offset=offset,
         )
-        
+
         batch_responses = [BatchResponse(**b) for b in batches]
-        
+
         return BatchListResponse(
             batches=batch_responses,
-            total=len(batch_responses)
+            total=total,          # ✅ real total, not len(current page)
         )
-    
+
     except Exception as e:
         print(f"❌ Failed to list batches: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to list batches: {str(e)}")
+
 
 
 @router.get("/{batch_id}", response_model=BatchResponse)
