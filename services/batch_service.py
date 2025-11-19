@@ -158,21 +158,14 @@ class BatchService:
         batch_id: str,
         user_id: str
     ) -> Optional[Dict[str, Any]]:
-        """
-        Get batch job details
-        
-        Args:
-            batch_id: UUID of batch
-            user_id: UUID of user (for ownership verification)
-            
-        Returns:
-            Batch dict if found, None otherwise
-        """
+        """Get active batch job details"""
         try:
             result = self.supabase.table(self.batch_table).select("*").eq(
                 "id", batch_id
             ).eq(
                 "user_id", user_id
+            ).eq(
+                "is_active", True
             ).execute()
             
             if not result.data:
@@ -187,6 +180,7 @@ class BatchService:
         except Exception as e:
             print(f"❌ Failed to get batch: {str(e)}")
             return None
+
     
     
     def list_batches(
@@ -212,6 +206,7 @@ class BatchService:
                 .table(self.batch_table)
                 .select("*", count="exact")
                 .eq("user_id", user_id)
+                .eq("is_active", True)
                 .order("created_at", desc=True)
             )
 
@@ -486,7 +481,7 @@ class BatchService:
         user_id: str
     ) -> bool:
         """
-        Delete a batch job (cascades to items)
+        Soft delete a batch job (set is_active to False)
         
         Args:
             batch_id: UUID of batch
@@ -502,19 +497,19 @@ class BatchService:
                 print(f"⚠️  Cannot delete - batch not found or unauthorized")
                 return False
             
-            # Delete batch (items cascade via ON DELETE CASCADE)
-            result = self.supabase.table(self.batch_table).delete().eq(
-                "id", batch_id
-            ).eq(
-                "user_id", user_id
-            ).execute()
+            # Soft delete batch
+            result = self.supabase.table(self.batch_table).update({
+                "is_active": False,
+                "updated_at": datetime.now().isoformat()
+            }).eq("id", batch_id).eq("user_id", user_id).execute()
             
-            print(f"✅ Batch deleted: {batch_id}")
-            return True
+            print(f"✅ Batch soft deleted: {batch_id}")
+            return bool(result.data)
         
         except Exception as e:
             print(f"❌ Failed to delete batch: {str(e)}")
             return False
+
     
     
     def count_user_batches(
@@ -522,20 +517,11 @@ class BatchService:
         user_id: str,
         status: Optional[str] = None
     ) -> int:
-        """
-        Count user's batches
-        
-        Args:
-            user_id: UUID of user
-            status: Optional status filter
-            
-        Returns:
-            Number of batches
-        """
+        """Count user's active batches"""
         try:
             query = self.supabase.table(self.batch_table).select(
                 "id", count="exact"
-            ).eq("user_id", user_id)
+            ).eq("user_id", user_id).eq("is_active", True)
             
             if status:
                 query = query.eq("status", status)
@@ -547,7 +533,7 @@ class BatchService:
         except Exception as e:
             print(f"❌ Failed to count batches: {str(e)}")
             return 0
-    
+        
     
     def get_failed_items(
         self,

@@ -54,11 +54,11 @@ class SessionService:
         return data
     
     def get_session(self, session_id: str) -> Optional[Dict]:
-        """Get session by session_id"""
+        """Get active session by session_id"""
         try:
             result = self.supabase.table("pdf_sessions").select("*").eq(
                 "session_id", session_id
-            ).single().execute()
+            ).eq("is_active", True).single().execute()
             
             return result.data if result.data else None
         except Exception:
@@ -99,20 +99,21 @@ class SessionService:
     
     @cache_user_sessions(ttl=300)
     def get_user_sessions(self, user_id: str, limit: int = 50, offset: int = 0) -> List[Dict]:
-        """Get all sessions for a user (newest first)"""
+        """Get all active sessions for a user (newest first)"""
         result = self.supabase.table("pdf_sessions").select("*").eq(
             "user_id", user_id
-        ).order("created_at", desc=True).limit(limit).offset(offset).execute()
+        ).eq("is_active", True).order("created_at", desc=True).limit(limit).offset(offset).execute()
         
         return result.data if result.data else []
     
     def delete_session(self, session_id: str) -> bool:
-        """Delete session from database"""
+        """Soft delete session (set is_active to False)"""
         session = self.get_session(session_id)
 
-        result = self.supabase.table("pdf_sessions").delete().eq(
-            "session_id", session_id
-        ).execute()
+        result = self.supabase.table("pdf_sessions").update({
+            "is_active": False,
+            "updated_at": datetime.now().isoformat()
+        }).eq("session_id", session_id).execute()
 
         success = bool(result.data)
 
@@ -143,5 +144,7 @@ class SessionService:
                 "session_id", count="exact"
                 ).eq(
                     "user_id", user_id
-                    ).execute() 
+                ).eq(
+                    "is_active", True
+                ).execute() 
         return result.count or 0
