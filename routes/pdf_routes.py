@@ -463,6 +463,31 @@ async def generate_pdf(
         user_id = current_user['id']
         num_pages = session["num_pages"]
         
+        # Check if session files exist locally
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        output_session = f"{pdf_processor.OUTPUT_FOLDER}/{session_id}"
+        
+        # If neither temp nor output exists, try to restore from storage
+        if not os.path.exists(session_temp_path) and not os.path.exists(output_session):
+            print(f"⚠️  Session files not found locally, attempting restore...")
+            
+            # For processing/failed sessions, we need the original PDF
+            original_storage_path = f"{user_id}/{session_id}/original.pdf"
+            
+            try:
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
+                    session_id,
+                    user_id,
+                    original_storage_path
+                )
+                print(f"✅ Session restored from original PDF")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Cannot generate PDF: session files not found and restore failed - {str(e)}"
+                )
+        
         # ⚡ ASYNC: Create PDF
         result = await run_async(
             pdf_processor.create_pdf_with_upload,
@@ -490,6 +515,8 @@ async def generate_pdf(
             total_pages=num_pages
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
         await run_async(
             session_service.update_session_status,
@@ -509,9 +536,6 @@ async def get_original_pdf(
 ):
     """
     Retrieves the original PDF file (before any filling) for template creation.
-    
-    This is necessary because the template API requires the file object, 
-    and the client needs to re-upload it via multipart/form-data.
     """
     session = session_service.get_session(session_id)
     if not session or session["user_id"] != current_user['id']:
@@ -521,7 +545,7 @@ async def get_original_pdf(
     user_id = current_user['id']
     local_pdf_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}/original.pdf"
     
-    # CRITICAL: Use the specified storage path convention
+    # CRITICAL: Always use the original PDF storage path
     original_storage_path = f"{user_id}/{session_id}/original.pdf"
     
     try:
@@ -534,40 +558,31 @@ async def get_original_pdf(
             )
         
         # 2. If not local, restore it from Supabase Storage
-        elif session.get("storage_path"):
-            
-            print(f"⚠️ Restoring original PDF from storage: {original_storage_path}")
+        print(f"⚠️ Restoring original PDF from storage: {original_storage_path}")
 
-            # ⚡ ASYNC: Download file from storage to temp folder
-            await run_async(
-                pdf_processor.download_file_from_storage,
-                original_storage_path,
-                local_pdf_path
-            )
-
-            # ⚡ ASYNC: Update session status back to processing after restoration
-            await run_async(
-                session_service.update_session_status,
-                session_id,
-                "processing"
-            )
-            
-            # Now serve the newly downloaded file
-            return FileResponse(
-                local_pdf_path,
-                media_type="application/pdf",
-                filename=session["filename"]
-            )
-
-        raise HTTPException(status_code=404, detail="Original PDF not found in session storage.")
+        # ⚡ ASYNC: Download file from storage to temp folder
+        await run_async(
+            pdf_processor.download_file_from_storage,
+            original_storage_path,
+            local_pdf_path
+        )
+        
+        # Now serve the newly downloaded file
+        return FileResponse(
+            local_pdf_path,
+            media_type="application/pdf",
+            filename=session["filename"]
+        )
 
     except HTTPException:
-        # Re-raise 403/404 errors
         raise
     except Exception as e:
         print(f"Error fetching original PDF: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve original PDF: {str(e)}") 
-
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to retrieve original PDF: {str(e)}"
+        )
+    
 # ============================================================================
 # BATCH OPERATIONS (PARALLEL!)
 # ============================================================================

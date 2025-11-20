@@ -591,24 +591,27 @@ class PDFProcessor:
 
     def restore_session_from_storage(self, session_id: str, user_id: str, storage_path: str) -> int:
         """
-        Restore a completed session from Supabase Storage
+        Restore a session from Supabase Storage
         Downloads original PDF and recreates temp files
         
         Args:
             session_id: Session to restore
             user_id: User ID
-            storage_path: Path to original PDF in storage
+            storage_path: Path to original PDF in storage (e.g., "user_id/session_id/original.pdf")
             
         Returns:
             Number of pages
         """
         try:
-            # Extract original PDF storage path
-            original_storage_path = f"{user_id}/{session_id}/original.pdf"
+            # Ensure storage_path is the original PDF path
+            if not storage_path.endswith("original.pdf"):
+                storage_path = f"{user_id}/{session_id}/original.pdf"
+            
+            print(f"🔄 Restoring session from: {storage_path}")
             
             # Download from Supabase Storage
             response = self.supabase.storage.from_(self.STORAGE_BUCKET).download(
-                original_storage_path
+                storage_path
             )
             
             # Save to local temp folder
