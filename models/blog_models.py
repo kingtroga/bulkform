@@ -68,6 +68,7 @@ class BlogListItem(BaseModel):
     title: str
     slug: str
     summary: str
+    content: str 
     author_id: Optional[str]
     youtube_url: Optional[str]
     cover_image_url: Optional[str]

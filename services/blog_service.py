@@ -216,7 +216,7 @@ class BlogService:
         """List all published AND active blogs (for public view)"""
         result = (
             self.supabase.table('blogs')
-            .select('id, title, slug, summary, author_id, youtube_url, cover_image_url, created_at, published, view_count, is_active')
+            .select('id, title, slug, summary, content, author_id, youtube_url, cover_image_url, created_at, published, view_count, is_active')
             .eq('published', True)
             .eq('is_active', True)
             .order('created_at', desc=True)
