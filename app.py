@@ -18,6 +18,7 @@ from routes.template_routes import router as template_router
 from routes.batch import router as batch_router
 from routes.image_routes import router as image_router
 from routes.payment_routes import router as payment_router
+from routes.blog_routes import router as blog_router
 from utils.cleanup import clear_folder
 from pathlib import Path
 from dotenv import load_dotenv
@@ -104,6 +105,7 @@ app.include_router(template_router)
 app.include_router(batch_router)
 app.include_router(image_router)
 app.include_router(payment_router)
+app.include_router(blog_router)
 
 # ============================================================================
 # PROTECTED DOCS ENDPOINTS (Production Only)
