@@ -52,17 +52,13 @@ class BlogService:
         # Wrap title text for better fit
         wrapped_title = self._wrap_text(title, max_chars_per_line=28)
         
-        # Load Inter font (you said you have it downloaded)
+        # Load Inter font
         try:
-            # Adjust path to wherever you stored Inter font
-            # Common paths: /static/fonts/Inter-Bold.ttf or /usr/share/fonts/truetype/inter/Inter-Bold.ttf
             font_title = ImageFont.truetype("fonts/inter.ttf", 72)
         except:
             try:
-                # Fallback to system Inter if available
                 font_title = ImageFont.truetype("/usr/share/fonts/truetype/inter/Inter-Bold.ttf", 72)
             except:
-                # Last resort fallback
                 font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
         
         # Fixed left margin position
@@ -72,10 +68,10 @@ class BlogService:
         # Add text shadow for better readability
         shadow_offset = 4
         draw.text((text_x + shadow_offset, text_y + shadow_offset), 
-                  wrapped_title, font=font_title, fill=(0, 0, 0, 150))
+                wrapped_title, font=font_title, fill=(200, 205, 210, 90))
         
-        # Draw main title text in white
-        draw.text((text_x, text_y), wrapped_title, font=font_title, fill='white')
+        # Main title text in #0058FF
+        draw.text((text_x, text_y), wrapped_title, font=font_title, fill=(0, 88, 255))
         
         # Save to bytes buffer
         buffer = io.BytesIO()
@@ -96,7 +92,7 @@ class BlogService:
         public_url = self.supabase.storage.from_(self.storage_bucket).get_public_url(file_path)
         
         return public_url
-    
+
     def _wrap_text(self, text: str, max_chars_per_line: int = 28) -> str:
         """
         Wrap text with specific word count rules:
@@ -178,18 +174,28 @@ class BlogService:
             'youtube_url': blog_data.get('youtube_url'),
             'published': blog_data.get('published', False),
             'view_count': 0,
-            'is_active': True
+            'is_active': True,
+            'cover_image_url': ''  # Placeholder, will update after upload
         }
         
-        # Generate cover image
-        cover_url = self.generate_cover_image(blog_data['summary'], blog_id)
-        blog_record['cover_image_url'] = cover_url
-        
-        # Insert into database
+        # Insert into database FIRST
         result = self.supabase.table('blogs').insert(blog_record).execute()
         
+        # Generate and upload cover image AFTER database insert succeeds
+        try:
+            cover_url = self.generate_cover_image(blog_data['summary'], blog_id)
+            
+            # Update the blog record with cover image URL
+            self.supabase.table('blogs').update({'cover_image_url': cover_url}).eq('id', blog_id).execute()
+            
+            # Update the returned result
+            result.data[0]['cover_image_url'] = cover_url
+        except Exception as e:
+            # If cover generation fails, blog still exists but without cover
+            print(f"Warning: Cover image generation failed: {e}")
+        
         return result.data[0]
-    
+
     def get_blog_by_slug(self, slug: str) -> Optional[dict]:
         """Retrieve blog post by slug"""
         result = self.supabase.table('blogs').select('*').eq('slug', slug).execute()

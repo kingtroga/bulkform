@@ -21,19 +21,17 @@ def get_blog_service() -> BlogService:
 
 def is_admin(current_user: dict = Depends(get_current_user)) -> dict:
     """
-    Check if user is admin by querying the admins table.
-    Uses the Supabase is_current_user_admin() function.
+    Check if user is admin by directly querying the admins table.
+    NOTE: We query directly because BlogService uses service_role credentials,
+    so RPC functions that rely on auth.uid() won't work correctly.
     """
     blog_service = BlogService()
     
     try:
-        # Use Supabase RPC to call is_current_user_admin() function
-        result = blog_service.supabase.rpc('is_current_user_admin').execute()
+        # Query admins table directly using the user_id
+        admin_check = blog_service.supabase.table('admins').select('user_id, email, role').eq('user_id', current_user['id']).execute()
         
-        # Check if the function returned True
-        is_admin_user = result.data if result.data is not None else False
-        
-        if not is_admin_user:
+        if not admin_check.data or len(admin_check.data) == 0:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Admin access required. Only admins can create blogs."
@@ -45,24 +43,10 @@ def is_admin(current_user: dict = Depends(get_current_user)) -> dict:
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        # Fallback: Query admins table directly if RPC fails
-        try:
-            admin_check = blog_service.supabase.table('admins').select('user_id').eq('user_id', current_user['id']).execute()
-            
-            if not admin_check.data:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Admin access required. Only admins can create blogs."
-                )
-            
-            return current_user
-        except HTTPException:
-            raise
-        except Exception as fallback_error:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Admin verification failed: {str(fallback_error)}"
-            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Admin verification failed: {str(e)}"
+        )
 
 
 @router.post("/", response_model=BlogResponse, status_code=status.HTTP_201_CREATED)
