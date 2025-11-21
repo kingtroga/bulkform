@@ -12,6 +12,9 @@ from datetime import datetime
 # REQUEST MODELS
 # ============================================================================
 
+class TemplateConversionRequest(BaseModel):
+    fields: Dict[str, list]
+    
 class CreateTemplateRequest(BaseModel):
     """Request to create a new custom template (multipart form data)"""
     name: str = Field(..., min_length=1, max_length=200, description="Template name")

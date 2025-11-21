@@ -9,7 +9,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Q
 from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
-    AddImageRequest, AddImageResponse, GeneratePDFResponse,
+    CoordConversionRequest, AddImageResponse, GeneratePDFResponse,
     SessionInfo, UserSessionsResponse, EncryptedGridResponse,
     EncryptedFillTextRequest, BatchFillTextRequest, EncryptedBatchFillTextRequest,
     BatchFillTextResponse
@@ -1111,6 +1111,19 @@ async def pdf_health():
         "grid_size": pdf_processor.GRID_SIZE,
         "dpi": pdf_processor.DPI
     }
+
+@router.post("/convert-coords")
+async def convert_coordinates(
+    data: CoordConversionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Convert pixel coordinates to grid coordinates"""
+    GRID_SIZE = 150  # Your grid size
+    
+    grid_x = round((data.pixel_x / data.page_width) * GRID_SIZE)
+    grid_y = round((data.pixel_y / data.page_height) * GRID_SIZE)
+    
+    return {"gridX": grid_x, "gridY": grid_y}
 
 
 # ============================================================================

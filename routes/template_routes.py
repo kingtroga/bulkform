@@ -28,7 +28,7 @@ from models.template_models import (
     TemplateCategoryResponse,
     TemplateCreatedResponse,
     TemplateDeletedResponse,
-    ErrorResponse
+    TemplateConversionRequest
 )
 from services.template_service import get_template_service
 from services.auth import get_current_user
@@ -819,3 +819,53 @@ async def get_template_categories():
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get categories: {str(e)}")
+
+@router.post("/convert-format")
+async def convert_template_format(
+    data: TemplateConversionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Convert user fields to template format"""
+    field_mappings = {}
+    
+    for page_num, fields in data.fields.items():
+        for field in fields:
+            # Skip fields with no name
+            if not field.get('name') or not field['name'].strip():
+                continue
+            
+            # Sanitize base name
+            import re
+            base_name = re.sub(r'[^a-zA-Z0-9_]', '_', field['name'].strip()).lower()
+            
+            field_name = base_name
+            index = 1
+            
+            # Handle duplicates
+            while field_name in field_mappings:
+                index += 1
+                field_name = f"{base_name}_{index}"
+            
+            # Base structure
+            mapping = {
+                "page": int(page_num),
+                "x": field['gridX'],
+                "y": field['gridY'],
+                "type": field['type']
+            }
+            
+            if field['type'] == 'text':
+                mapping.update({
+                    "size": field['size'],
+                    "font": field['font'],
+                    "align": field['align']
+                })
+            elif field['type'] == 'image':
+                mapping.update({
+                    "width": field.get('width', 200),
+                    "height": field.get('height', 60)
+                })
+            
+            field_mappings[field_name] = mapping
+    
+    return field_mappings

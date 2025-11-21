@@ -36,6 +36,12 @@ class EncryptedGridResponse(BaseModel):
     dpi: int
     success: bool = True
 
+class CoordConversionRequest(BaseModel):
+    pixel_x: int
+    pixel_y: int
+    page_width: int
+    page_height: int
+
 # ============================================================================
 # TEXT PLACEMENT MODELS
 # ============================================================================
