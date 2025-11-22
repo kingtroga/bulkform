@@ -2,12 +2,55 @@
 
 import time
 from typing import Dict, Any, List, Tuple, Optional
+from datetime import datetime, timezone  # ✅ NEW
 
 from services.supabase_client import get_supabase
 from fastapi import HTTPException
 from services.template_service import get_template_service
 
 template_service = get_template_service()
+
+
+def _parse_supabase_timestamp(raw) -> Optional[int]:
+    """
+    Convert Supabase timestamptz (e.g. '2026-11-22 05:05:05+00') or a unix ts
+    into a unix timestamp (int). Returns None if parsing fails.
+    """
+    if raw is None:
+        return None
+
+    try:
+        # Already numeric?
+        if isinstance(raw, (int, float)):
+            return int(raw)
+
+        s = str(raw).strip()
+        # Pure integer string?
+        if s.isdigit():
+            return int(s)
+
+        # Normalize ISO format: space -> 'T'
+        s_norm = s.replace(" ", "T")
+
+        # Fix timezone like '+00' into '+00:00' if needed
+        for sign in ["+", "-"]:
+            idx = s_norm.rfind(sign)
+            if idx > 10:
+                main = s_norm[:idx]
+                tz = s_norm[idx:]
+                # e.g. '+00' or '-03'
+                if len(tz) == 3:
+                    tz = tz + ":00"
+                    s_norm = main + tz
+                break
+
+        dt = datetime.fromisoformat(s_norm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return int(dt.timestamp())
+    except Exception:
+        return None
 
 
 def ensure_template_single_fill_access(user_id: str, template: dict):
@@ -57,12 +100,9 @@ def ensure_template_single_fill_access(user_id: str, template: dict):
     has_pass = False
     exp_raw = profile.get("official_library_pass_expires_at")
     if profile.get("official_library_pass") and exp_raw:
-        try:
-            exp_ts = int(exp_raw)
-            if exp_ts > int(time.time()):
-                has_pass = True
-        except Exception:
-            pass
+        exp_ts = _parse_supabase_timestamp(exp_raw)  # ✅ FIXED
+        if exp_ts is not None and exp_ts > int(time.time()):
+            has_pass = True
 
     if has_pass:
         return
@@ -83,12 +123,10 @@ def ensure_template_single_fill_access(user_id: str, template: dict):
 
     exp_raw = purchase.get("expires_at")
     if exp_raw:
-        try:
-            exp_ts = int(exp_raw)
-            if exp_ts == 0 or exp_ts > int(time.time()):
-                return  # PURCHASE VALID
-        except Exception:
-            pass
+        exp_ts = _parse_supabase_timestamp(exp_raw)  # ✅ FIXED
+        now = int(time.time())
+        if exp_ts is not None and (exp_ts == 0 or exp_ts > now):
+            return  # PURCHASE VALID
 
     # ----------------------------------------------------------------------
     # 4. DENY ACCESS → No pass, no purchase
@@ -145,10 +183,9 @@ class EntitlementService:
         if not expires:
             return False
 
-        # expires is stored as unix timestamp (string or int)
-        try:
-            exp_ts = int(expires)
-        except (TypeError, ValueError):
+        # ✅ FIXED: parse Supabase timestamptz / unix ts safely
+        exp_ts = _parse_supabase_timestamp(expires)
+        if exp_ts is None:
             return False
 
         now = int(time.time())
@@ -228,13 +265,9 @@ class EntitlementService:
             purchase = purchase_result.data
             if purchase:
                 expires = purchase.get("expires_at")
-                try:
-                    exp_ts = int(expires)
-                except (TypeError, ValueError):
-                    exp_ts = 0
-
+                exp_ts = _parse_supabase_timestamp(expires)  # ✅ FIXED
                 now = int(time.time())
-                if exp_ts == 0 or exp_ts > now:
+                if exp_ts is not None and (exp_ts == 0 or exp_ts > now):
                     return {
                         "has_access": True,
                         "access_via": "purchase",
