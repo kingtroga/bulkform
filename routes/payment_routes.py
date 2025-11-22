@@ -15,6 +15,7 @@ from models.payment_models import (
 )
 from services.supabase_client import get_supabase
 from services.auth import get_current_user
+from datetime import datetime, timezone
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -26,6 +27,183 @@ STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 logger.info("Payment routes initialized")
+
+
+def _normalize_timestamp(value):
+    """
+    Accepts:
+      - Unix timestamp (int/float)
+      - ISO string (e.g. '2025-11-22T03:45:00+00:00')
+    Returns: (iso_string_or_none, unix_timestamp_or_none)
+    """
+    if value is None:
+        return None, None
+
+    # Already a unix timestamp
+    if isinstance(value, (int, float)):
+        dt = datetime.fromtimestamp(value, tz=timezone.utc)
+        return dt.isoformat(), int(value)
+
+    # Likely an ISO string from Supabase/PostgREST
+    if isinstance(value, str):
+        try:
+            # Handle possible "Z" suffix
+            cleaned = value.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(cleaned)
+            return dt.astimezone(timezone.utc).isoformat(), int(dt.timestamp())
+        except Exception as e:
+            logger.warning(f"Unexpected timestamp format in DB: {value} ({e})")
+            # Fall back to returning the raw string
+            return value, None
+
+    # Unknown type
+    logger.warning(f"Unknown timestamp type: {type(value)} ({value})")
+    return None, None
+
+
+# ============================================================================
+# SUBSCRIPTION MANAGEMENT
+# ============================================================================
+
+@router.post("/subscription/cancel")
+async def cancel_subscription(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Cancel active subscription.
+    
+    🔒 Requires authentication
+    
+    Cancels the user's active subscription (starter/pro).
+    Subscription remains active until the end of the current billing period.
+    """
+    user_id = current_user["id"]
+    logger.info(f"🚫 Cancel subscription request - user: {user_id}")
+    
+    # Get user's profile to find subscription
+    try:
+        profile = supabase.table("profiles").select(
+            "stripe_subscription_id, subscription_tier, subscription_status"
+        ).eq("id", user_id).single().execute()
+        
+        if not profile.data:
+            raise HTTPException(404, "Profile not found")
+        
+        subscription_id = profile.data.get("stripe_subscription_id")
+        current_tier = profile.data.get("subscription_tier")
+        current_status = profile.data.get("subscription_status")
+        
+        # Check if user has an active subscription
+        if not subscription_id:
+            logger.warning(f"User {user_id} has no subscription to cancel")
+            raise HTTPException(400, "No active subscription found")
+        
+        if current_status != "active":
+            logger.warning(f"User {user_id} subscription is not active (status: {current_status})")
+            raise HTTPException(400, f"Subscription is not active (current status: {current_status})")
+        
+        logger.info(f"Canceling subscription: {subscription_id} (tier: {current_tier})")
+        
+        # Cancel subscription in Stripe
+        import stripe
+        canceled_sub = stripe.Subscription.modify(
+            subscription_id,
+            cancel_at_period_end=True
+        )
+        
+        logger.info(f"✅ Subscription canceled in Stripe - will end at {canceled_sub.current_period_end}")
+        
+        # Update database
+        supabase.table("profiles").update({
+            "subscription_status": "canceled"  # Mark as canceled but still active until period ends
+        }).eq("id", user_id).execute()
+        
+        from datetime import datetime, timezone
+        period_end = datetime.fromtimestamp(canceled_sub.current_period_end, tz=timezone.utc)
+        
+        return {
+            "message": "Subscription canceled successfully",
+            "subscription_id": subscription_id,
+            "tier": current_tier,
+            "cancel_at_period_end": True,
+            "access_until": period_end.isoformat(),
+            "access_until_timestamp": canceled_sub.current_period_end
+        }
+        
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error canceling subscription: {e}")
+        raise HTTPException(500, f"Failed to cancel subscription: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error canceling subscription: {e}", exc_info=True)
+        raise HTTPException(500, f"Failed to cancel subscription: {str(e)}")
+
+
+@router.get("/subscription/status")
+async def get_subscription_status(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get current subscription status.
+    
+    🔒 Requires authentication
+    
+    Returns detailed information about the user's subscription.
+    """
+    user_id = current_user["id"]
+    logger.info(f"📊 Subscription status request - user: {user_id}")
+    
+    try:
+        profile = supabase.table("profiles").select(
+            "subscription_tier, subscription_status, stripe_subscription_id, "
+            "current_period_end, forms_included_in_plan, forms_used_this_month, "
+            "official_library_pass, official_library_pass_expires_at"
+        ).eq("id", user_id).single().execute()
+        
+        if not profile.data:
+            raise HTTPException(404, "Profile not found")
+        
+        data = profile.data
+
+        # Safely coerce to ints (None → 0)
+        included = data.get("forms_included_in_plan") or 0
+        used = data.get("forms_used_this_month") or 0
+        
+        forms_remaining = max(0, included - used)
+        
+        response = {
+            "subscription_tier": data.get("subscription_tier", "free"),
+            "subscription_status": data.get("subscription_status"),
+            "forms_included": included,
+            "forms_used": used,
+            "forms_remaining": forms_remaining,
+            "official_library_pass": data.get("official_library_pass", False),
+        }
+        
+        # Add period end (handles both unix and ISO string)
+        current_period_raw = data.get("current_period_end")
+        iso_val, ts_val = _normalize_timestamp(current_period_raw)
+        if iso_val:
+            response["current_period_end"] = iso_val
+            if ts_val is not None:
+                response["current_period_end_timestamp"] = ts_val
+        
+        # Add library pass expiry (handles both unix and ISO string)
+        pass_raw = data.get("official_library_pass_expires_at")
+        pass_iso, pass_ts = _normalize_timestamp(pass_raw)
+        if pass_iso:
+            response["library_pass_expires_at"] = pass_iso
+            if pass_ts is not None:
+                response["library_pass_expires_at_timestamp"] = pass_ts
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting subscription status: {e}", exc_info=True)
+        raise HTTPException(500, f"Failed to get subscription status: {str(e)}")
 
 
 # ============================================================================
@@ -93,8 +271,8 @@ async def create_payg_checkout(
 ):
     """
     Create Stripe checkout for PAYG forms.
-    
-    Request body: {"quantity": 2}  (2 × 100 = 200 forms)
+
+    Request body: {"quantity": 200}  (200 forms)
     """
     user_id = current_user["id"]
     logger.info(f"🛒 PAYG checkout request - user: {user_id}, quantity: {req.quantity}")
