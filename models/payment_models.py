@@ -1,28 +1,42 @@
-from typing import Dict, Literal, Optional
 from pydantic import BaseModel
+from typing import Optional
 
-# super simple in-memory store
-ORDERS: Dict[str, "Order"] = {}
-SUBSCRIPTIONS: Dict[str, "SubscriptionState"] = {}  # keyed by user_id
 
-OrderStatus = Literal["pending", "paid", "canceled"]
+# ============================================================================
+# Request Models
+# ============================================================================
 
-class Order(BaseModel):
-    id: str
-    user_id: str
-    mode: Literal["payment", "subscription"]
-    status: OrderStatus = "pending"
-    stripe_session_id: Optional[str] = None
-    stripe_payment_intent: Optional[str] = None
-    amount_total: Optional[int] = None
+class SubscriptionCheckoutRequest(BaseModel):
+    """Request to create a subscription checkout (starter/pro)"""
+    plan_name: str  # "starter" or "pro"
 
-class SubscriptionState(BaseModel):
-    user_id: str
-    stripe_customer_id: Optional[str] = None
-    stripe_subscription_id: Optional[str] = None
-    status: Optional[str] = None           # active/trialing/past_due/canceled
-    current_period_end: Optional[int] = None
 
-class SessionReq(BaseModel):
-    user_id: str
-    quantity: int | None = 1 
+class PaygCheckoutRequest(BaseModel):
+    """Request to create a PAYG checkout (one-time payment for forms)"""
+    quantity: int = 1  # Number of 100-form bundles
+
+
+class TemplateCheckoutRequest(BaseModel):
+    """Request to purchase a single template (annual subscription)"""
+    # template_id comes from URL path parameter
+    pass
+
+
+class LibraryPassCheckoutRequest(BaseModel):
+    """Request to purchase library pass (annual subscription to all templates)"""
+    pass
+
+
+# ============================================================================
+# Response Models
+# ============================================================================
+
+class CheckoutSessionResponse(BaseModel):
+    """Response with Stripe checkout URL"""
+    url: str
+    session_id: str
+
+
+class StripeConfigResponse(BaseModel):
+    """Response with Stripe publishable key"""
+    publishable_key: str

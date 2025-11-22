@@ -1,120 +1,195 @@
 import os
-from fastapi import APIRouter, HTTPException, Request
+import logging
+from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
 from services.payment_service import PaymentService
-from models.payment_models import ORDERS, SUBSCRIPTIONS, Order, SubscriptionState, SessionReq
+from models.payment_models import (
+    SubscriptionCheckoutRequest,
+    PaygCheckoutRequest,
+    TemplateCheckoutRequest,
+    LibraryPassCheckoutRequest,
+    CheckoutSessionResponse,
+    StripeConfigResponse
+)
+from services.supabase_client import get_supabase
+from services.auth import get_current_user
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/payment", tags=["Payments"])
-PK = os.getenv("STRIPE_PUBLISHABLE_KEY")
-WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")  # set via Stripe CLI or dashboard
+supabase = get_supabase()
 
-@router.get("/config")
-async def config():
-    if not PK:
-        raise HTTPException(500, "Publishable key missing")
-    return {"publishable_key": PK}
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-@router.post("/payg/checkout-session")
-async def payg_checkout(req: SessionReq):
-    # 1) make a pending order
-    order_id = PaymentService.new_order_id()
-    order = Order(id=order_id, user_id=req.user_id, mode="payment")
-    ORDERS[order_id] = order
+logger.info("Payment routes initialized")
 
-    # 2) create checkout session
-    session = PaymentService.create_payg_checkout_session(
-        quantity=req.quantity or 1,
-        metadata={"order_id": order_id, "user_id": req.user_id, "plan": "payg"},
-    )
-    # 3) store refs
-    order.stripe_session_id = session.id
-    order.stripe_payment_intent = session.payment_intent
-    return {"order_id": order_id, "url": session.url, "session_id": session.id}
 
-@router.post("/subscription/checkout-session")
-async def subscription_checkout(req: SessionReq):
-    order_id = PaymentService.new_order_id()
-    order = Order(id=order_id, user_id=req.user_id, mode="subscription")
-    ORDERS[order_id] = order
+# ============================================================================
+# PUBLIC ENDPOINTS
+# ============================================================================
 
-    session = PaymentService.create_subscription_checkout_session(
-        metadata={"order_id": order_id, "user_id": req.user_id, "plan": "subscription"},
-    )
-    order.stripe_session_id = session.id
-    order.stripe_payment_intent = session.payment_intent
-    return {"order_id": order_id, "url": session.url, "session_id": session.id}
+@router.get("/config", response_model=StripeConfigResponse)
+async def get_stripe_config():
+    """Get Stripe publishable key for frontend"""
+    if not STRIPE_PUBLISHABLE_KEY:
+        raise HTTPException(500, "Stripe not configured")
+    return StripeConfigResponse(publishable_key=STRIPE_PUBLISHABLE_KEY)
 
-@router.get("/orders/{order_id}")
-async def read_order(order_id: str):
-    order = ORDERS.get(order_id)
-    if not order:
-        raise HTTPException(404, "Order not found")
-    return {
-        "id": order.id,
-        "user_id": order.user_id,
-        "mode": order.mode,
-        "status": order.status,
-        "session_id": order.stripe_session_id,
-        "payment_intent": order.stripe_payment_intent,
-        "amount_total": order.amount_total,
-    }
 
-@router.post("/webhook", include_in_schema=False)
-async def webhook(request: Request):
-    if not WEBHOOK_SECRET:
-        return PlainTextResponse("Webhook not configured", status_code=500)
+# ============================================================================
+# CHECKOUT ENDPOINTS
+# ============================================================================
 
-    payload = await request.body()
-    sig = request.headers.get("Stripe-Signature", "")
-
+@router.post("/subscription/checkout", response_model=CheckoutSessionResponse)
+async def create_subscription_checkout(
+    req: SubscriptionCheckoutRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create Stripe checkout for starter/pro subscription.
+    
+    Request body: {"plan_name": "starter"} or {"plan_name": "pro"}
+    """
+    user_id = current_user["id"]
+    logger.info(f"🛒 Subscription checkout request - user: {user_id}, plan: {req.plan_name}")
+    
+    if req.plan_name not in ["starter", "pro"]:
+        raise HTTPException(400, f"Invalid plan: {req.plan_name}. Use 'starter' or 'pro'.")
+    
     try:
-        event = PaymentService.construct_event(payload, sig, WEBHOOK_SECRET)
+        session = PaymentService.create_subscription_checkout(user_id, req.plan_name)
+        return CheckoutSessionResponse(url=session.url, session_id=session.id)
     except Exception as e:
-        return PlainTextResponse(f"Invalid signature: {e}", status_code=400)
+        logger.error(f"Failed to create subscription checkout: {e}", exc_info=True)
+        raise HTTPException(400, str(e))
 
-    etype = event["type"]
-    obj = event["data"]["object"]
 
-    # one handler to understand both flows via Checkout
-    if etype == "checkout.session.completed":
-        meta = obj.get("metadata") or {}
-        order_id = meta.get("order_id")
-        user_id = meta.get("user_id")
-        plan = meta.get("plan")
-        amount = obj.get("amount_total")
-        pi_id = obj.get("payment_intent")
+@router.post("/payg/checkout", response_model=CheckoutSessionResponse)
+async def create_payg_checkout(
+    req: PaygCheckoutRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create Stripe checkout for PAYG forms.
+    
+    Request body: {"quantity": 2}  (2 × 100 = 200 forms)
+    """
+    user_id = current_user["id"]
+    logger.info(f"🛒 PAYG checkout request - user: {user_id}, quantity: {req.quantity}")
+    
+    if req.quantity < 1:
+        raise HTTPException(400, "Quantity must be at least 1")
+    
+    try:
+        session = PaymentService.create_payg_checkout(user_id, req.quantity)
+        return CheckoutSessionResponse(url=session.url, session_id=session.id)
+    except Exception as e:
+        logger.error(f"Failed to create PAYG checkout: {e}", exc_info=True)
+        raise HTTPException(400, str(e))
 
-        if order_id in ORDERS:
-            order = ORDERS[order_id]
-            order.status = "paid"
-            order.amount_total = amount
-            order.stripe_payment_intent = pi_id
 
-            if plan == "subscription":
-                # store basic subscription state so you can check access later
-                sub_id = obj.get("subscription")
-                if sub_id:
-                    sub = PaymentService.retrieve_subscription(sub_id)
-                    SUBSCRIPTIONS[user_id] = SubscriptionState(
-                        user_id=user_id,
-                        stripe_customer_id=sub.customer,
-                        stripe_subscription_id=sub.id,
-                        status=sub.status,
-                        current_period_end=sub.current_period_end,
-                    )
+@router.post("/templates/{template_id}/checkout", response_model=CheckoutSessionResponse)
+async def create_template_checkout(
+    template_id: str,
+    req: TemplateCheckoutRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create Stripe checkout for single template purchase.
+    
+    Path parameter: template_id (UUID of template)
+    """
+    user_id = current_user["id"]
+    logger.info(f"🛒 Template checkout request - user: {user_id}, template: {template_id}")
+    
+    # Fetch template to get price_id
+    result = supabase.table("pdf_templates").select("stripe_price_id, is_free").eq("id", template_id).single().execute()
+    
+    if not result.data:
+        raise HTTPException(404, "Template not found")
+    
+    if result.data.get("is_free"):
+        raise HTTPException(400, "This template is free")
+    
+    price_id = result.data.get("stripe_price_id")
+    if not price_id:
+        raise HTTPException(400, "Template missing price configuration")
+    
+    try:
+        session = PaymentService.create_template_checkout(user_id, template_id, price_id)
+        return CheckoutSessionResponse(url=session.url, session_id=session.id)
+    except Exception as e:
+        logger.error(f"Failed to create template checkout: {e}", exc_info=True)
+        raise HTTPException(400, str(e))
 
-    # keep sub status in sync over time (optional but good practice)
-    elif etype in (
-        "customer.subscription.created",
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    ):
-        sub = obj
-        # You’d map sub.customer -> your user_id in a real DB.
-        # Omitted here because this is a tiny demo.
 
+@router.post("/library-pass/checkout", response_model=CheckoutSessionResponse)
+async def create_library_pass_checkout(
+    req: LibraryPassCheckoutRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Create Stripe checkout for library pass (all templates).
+    """
+    user_id = current_user["id"]
+    logger.info(f"🛒 Library pass checkout request - user: {user_id}")
+    
+    try:
+        session = PaymentService.create_library_pass_checkout(user_id)
+        return CheckoutSessionResponse(url=session.url, session_id=session.id)
+    except Exception as e:
+        logger.error(f"Failed to create library pass checkout: {e}", exc_info=True)
+        raise HTTPException(400, str(e))
+
+
+# ============================================================================
+# WEBHOOK
+# ============================================================================
+
+@router.post("/webhook")
+async def stripe_webhook(request: Request):
+    """
+    Stripe webhook endpoint.
+    
+    This receives events from Stripe when payments succeed/fail.
+    """
+    logger.info("📨 Webhook received")
+    
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("STRIPE_WEBHOOK_SECRET not configured!")
+        return PlainTextResponse("Webhook not configured", status_code=500)
+    
+    # Get payload and signature
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    
+    # Verify and construct event
+    try:
+        event = PaymentService.construct_webhook_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        logger.error(f"❌ Invalid webhook signature: {e}")
+        return PlainTextResponse("Invalid signature", status_code=400)
+    
+    event_type = event["type"]
+    event_data = event["data"]["object"]
+    
+    logger.info(f"📬 Event type: {event_type}")
+    
+    # Handle checkout completion
+    if event_type == "checkout.session.completed":
+        logger.info("🎯 Processing checkout.session.completed")
+        try:
+            PaymentService.handle_checkout_completed(event_data)
+            logger.info("✅ Checkout processed successfully")
+        except Exception as e:
+            logger.error(f"❌ Error processing checkout: {e}", exc_info=True)
+            # Still return 200 to prevent Stripe retries
+    
+    else:
+        logger.debug(f"Ignoring event type: {event_type}")
+    
     return PlainTextResponse("ok", status_code=200)

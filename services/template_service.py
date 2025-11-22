@@ -306,84 +306,66 @@ class TemplateService:
         user_id: str,
         name: str,
         pdf_url: str,
-        field_mappings: Dict[str, Any],
+        field_mappings: dict,
         official_form_id: str,
         category: str = "immigration",
-        description: Optional[str] = None,
-        price: float = 0.00
+        description: str = None,
+        price: float = 0.00,
+        stripe_price_id: str = None,
+        complexity: str = "simple"
     ) -> str:
         """
-        Create an official BulkForm template
-        
-        🔒 SECURITY: Only admins can create official templates!
-        This method checks if user_id is in the admins table.
+        Create official BulkForm template with Stripe integration
         
         Args:
-            user_id: Your admin user_id
-            name: Template name (e.g., "USCIS Form I-485")
-            pdf_url: URL to blank PDF
+            user_id: Admin user ID (must be admin)
+            name: Template name
+            pdf_url: Storage path to PDF
             field_mappings: Field coordinate mappings
-            official_form_id: Form identifier (e.g., "i-485")
-            category: Template category (default: "immigration")
+            official_form_id: Form ID (e.g., 'i-485')
+            category: Template category
             description: Optional description
-            price: Price in dollars (default: 0.00 = free)
-            
-        Returns:
-            UUID string of created official template
-            
-        Raises:
-            Exception: If user is not an admin
-            
-        Example:
-            template_id = service.create_official_template(
-                user_id="your-admin-id",
-                name="USCIS Form I-485",
-                pdf_url="https://uscis.gov/i-485.pdf",
-                field_mappings={...},
-                official_form_id="i-485"
-            )
-        """
-        try:
-            # 🔒 SECURITY CHECK: Verify user is admin
-            if not self.is_admin(user_id):
-                raise Exception(
-                    f"Permission denied: User {user_id} is not an admin. "
-                    "Only admins can create official templates."
-                )
-            
-            # Validate field mappings
-            if not self.validate_field_mappings(field_mappings):
-                raise Exception("Invalid field mappings")
-            
-            # Prepare data with official flags
-            template_data = {
-                "user_id": user_id,
-                "name": name,
-                "pdf_url": pdf_url,
-                "field_mappings": field_mappings,
-                "description": description,
-                "is_official": True,
-                "official_form_id": official_form_id.lower(),
-                "category": category,
-                "price": price,
-                "downloads": 0
-            }
-            
-            # Insert using service role (bypasses RLS)
-            result = self.supabase.table(self.table_name).insert(template_data).execute()
-            
-            if not result.data:
-                raise Exception("Failed to create official template - no data returned")
-            
-            template_id = result.data[0]["id"]
-            print(f"⭐ Official template created by admin: {template_id} (form: {official_form_id})")
-            
-            return template_id
+            price: Annual subscription price in dollars
+            stripe_price_id: Stripe Price ID (from Stripe API)
+            complexity: 'simple', 'medium', or 'complex'
         
-        except Exception as e:
-            print(f"❌ Failed to create official template: {str(e)}")
-            raise Exception(f"Official template creation failed: {str(e)}")
-    
+        Returns:
+            template_id: UUID of created template
+        
+        Raises:
+            ValueError: If user is not admin
+        """
+        # Check if user is admin
+        if not self.is_admin(user_id):
+            raise ValueError("Only admins can create official templates")
+        
+        template_id = str(uuid.uuid4())
+        
+        # Insert into database
+        self.supabase.table(self.table_name).insert({
+            'id': template_id,
+            'user_id': user_id,
+            'name': name,
+            'pdf_url': pdf_url,
+            'field_mappings': field_mappings,
+            'is_official': True,
+            'official_form_id': official_form_id,
+            'category': category,
+            'description': description,
+            'price': str(price),  # Store as string (e.g., "10.00")
+            'stripe_price_id': stripe_price_id,
+            'complexity': complexity,
+            'rental_duration_days': 365,  # Annual subscription
+            'created_at': 'now()'
+        }).execute()
+        
+        print(f"✅ Official template created: {template_id}")
+        print(f"   Name: {name}")
+        print(f"   Form ID: {official_form_id}")
+        print(f"   Price: ${price}/year")
+        print(f"   Stripe Price ID: {stripe_price_id}")
+        
+        return template_id
     
     def is_admin(self, user_id: str) -> bool:
         """

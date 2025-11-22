@@ -18,6 +18,7 @@ Endpoints:
 from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile
 from typing import Optional, Dict, Any
 import os
+import stripe
 from models.template_models import (
     CreateTemplateRequest,
     UpdateTemplateRequest,
@@ -36,7 +37,11 @@ from services.pdf_processor import PDFProcessor # Assuming PDFProcessor is avail
 from utils.utils import run_async 
 from starlette.responses import FileResponse # <-- NEW: For serving the image file
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 
+load_dotenv()
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 router = APIRouter(prefix="/api/templates", tags=["Templates"])
 
 # Initialize service
@@ -692,23 +697,29 @@ async def create_official_template(
     file: UploadFile = File(..., description="PDF template file"),
     official_form_id: str = Form(..., description="Form ID (e.g., 'i-485')"),
     category: str = Form(default="immigration", description="Template category"),
-    price: float = Form(default=0.00, description="Price in dollars"),
+    price: float = Form(default=0.00, description="Annual subscription price in dollars"),
     description: Optional[str] = Form(None, description="Template description"),
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Create official template
+    Create official template with automatic Stripe product/price creation
     
     🔒 ADMIN ONLY
     
-    **Upload PDF + metadata for official template!**
+    **Workflow:**
+    1. Validate admin status
+    2. Upload PDF to Supabase Storage
+    3. Create Stripe Product
+    4. Create Stripe Price (annual subscription)
+    5. Insert template into database with stripe_price_id
     
+    **Parameters:**
     - **file**: PDF file (required)
     - **name**: Template name (required)
     - **official_form_id**: Form ID like 'i-485', 'i-765' (required)
     - **field_mappings**: JSON string of field coordinates (required)
     - **category**: Category (default: "immigration")
-    - **price**: Price in dollars (default: 0.00)
+    - **price**: Annual subscription price in dollars (required, e.g., 10.00, 15.00, 25.00)
     - **description**: Optional description
     """
     try:
@@ -744,12 +755,6 @@ async def create_official_template(
         # Read file content
         file_content = await file.read()
         
-        # Save to temp location
-        import os
-        temp_path = f"/tmp/official_template_{template_id}.pdf"
-        with open(temp_path, "wb") as f:
-            f.write(file_content)
-        
         # Upload to Supabase Storage: official_templates/{official_form_id}/{template_id}.pdf
         storage_path = f"official_templates/{official_form_id}/{template_id}.pdf"
         
@@ -762,16 +767,67 @@ async def create_official_template(
                 file_options={"content-type": "application/pdf"}
             )
         except Exception as e:
-            # If upload fails, clean up
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
             raise Exception(f"Failed to upload PDF to storage: {str(e)}")
         
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        # Create Stripe Product and Price (if price > 0)
+        stripe_price_id = None
         
-        # Create official template (will check admin status internally)
+        if price > 0:
+            try:
+                # Create Stripe Product
+                stripe_product = stripe.Product.create(
+                    name=f"BulkForm {name} Template",
+                    description=f"Annual subscription to {name} official template",
+                    metadata={
+                        "template_id": template_id,
+                        "official_form_id": official_form_id,
+                        "category": category
+                    }
+                )
+                
+                # Create Stripe Price (annual recurring)
+                stripe_price = stripe.Price.create(
+                    product=stripe_product.id,
+                    unit_amount=int(price * 100),  # Convert dollars to cents
+                    currency="usd",
+                    recurring={
+                        "interval": "year",
+                        "interval_count": 1
+                    },
+                    metadata={
+                        "template_id": template_id,
+                        "official_form_id": official_form_id
+                    }
+                )
+                
+                stripe_price_id = stripe_price.id
+                
+                print(f"✅ Stripe Product Created: {stripe_product.id}")
+                print(f"✅ Stripe Price Created: {stripe_price_id} (${price}/year)")
+                
+            except stripe.error.StripeError as e:
+                # Rollback storage upload on Stripe failure
+                try:
+                    pdf_processor.supabase.storage.from_(
+                        pdf_processor.STORAGE_BUCKET
+                    ).remove([storage_path])
+                except:
+                    pass
+                
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Stripe integration failed: {str(e)}"
+                )
+        
+        # Determine complexity from price (reverse engineering)
+        if price <= 10:
+            complexity = "simple"
+        elif price <= 20:
+            complexity = "medium"
+        else:
+            complexity = "complex"
+        
+        # Create official template in database (will check admin status internally)
         template_id = template_service.create_official_template(
             user_id=user_id,
             name=name,
@@ -780,12 +836,15 @@ async def create_official_template(
             official_form_id=official_form_id,
             category=category,
             description=description,
-            price=price
+            price=price,
+            stripe_price_id=stripe_price_id,
+            complexity=complexity
         )
         
         return TemplateCreatedResponse(
             template_id=template_id,
-            message="Official template created successfully"
+            message=f"Official template created successfully with Stripe product (${price}/year)",
+            stripe_price_id=stripe_price_id
         )
     
     except ValueError as e:

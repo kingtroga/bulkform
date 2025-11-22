@@ -14,7 +14,7 @@ from datetime import datetime
 
 class TemplateConversionRequest(BaseModel):
     fields: Dict[str, list]
-    
+
 class CreateTemplateRequest(BaseModel):
     """Request to create a new custom template (multipart form data)"""
     name: str = Field(..., min_length=1, max_length=200, description="Template name")
@@ -200,6 +200,7 @@ class TemplateCreatedResponse(BaseModel):
     """Response after creating template"""
     template_id: str
     message: str
+    stripe_price_id: Optional[str] = None
     
     class Config:
         json_schema_extra = {

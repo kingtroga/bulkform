@@ -15,7 +15,7 @@ SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", os.getenv("SUPABASE_KEY")
 
 # ADMIN EMAILS - Replace with your actual email(s)
 ADMIN_EMAILS = [
-    "trogaclassicman@gmail.com",  # ← CHANGE THIS TO YOUR EMAIL
+    "trogaclassicman@gmail.com",  
 ]
 
 def verify_token(token: str) -> dict:
