@@ -289,3 +289,40 @@ class BatchItemInternal(BaseModel):
     
     class Config:
         orm_mode = True
+
+class SingleFillRequest(BaseModel):
+    """Single-fill using the batch pipeline with exactly one item"""
+    template_id: str = Field(..., description="UUID of template to use")
+    batch_name: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        description="Optional name for this single-fill batch"
+    )
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Single client data row (same as one item in batch.items)"
+    )
+    options: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Batch-level options (default_font, default_size, image defaults, etc.)"
+    )
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "template_id": "8089713c-1115-4dab-bf01-c652b2f8d7ad",
+                "batch_name": "Single Fill - Test1",
+                "data": {
+                    "field_1": "John Doe",
+                    "field_2": "123 Main Street",
+                    "field_3": "Houston, TX 77001",
+                    "field_4": "2025-11-21"
+                },
+                "options": {
+                    "default_font": "arial",
+                    "default_size": 30,
+                    "default_align": "center"
+                }
+            }
+        }

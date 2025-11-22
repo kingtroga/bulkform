@@ -24,12 +24,15 @@ from models.batch_models import (
     BatchDeletedResponse,
     ProcessBatchResponse,
     BatchDownloadResponse,
-    BatchItemResponse
+    BatchItemResponse,
+    SingleFillRequest,
 )
 from services.batch_service import get_batch_service
 from services.csv_processor import get_csv_processor
 from services.template_service import get_template_service
 from services.auth import get_current_user
+from services.entitlement_service import ensure_template_single_fill_access
+
 
 from .batch_helpers import (
     get_services,
@@ -912,3 +915,96 @@ async def batch_health():
             "streaming_zip_download": True
         }
     }
+
+
+@router.post("/single-from-json", response_model=ProcessBatchResponse, status_code=201)
+async def single_fill_from_json(
+    request: SingleFillRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Flow 1 (backend implementation): Single-fill using batch pipeline.
+
+    - Creates a batch with exactly ONE item
+    - Enforces Flow 1 entitlement rules via ensure_template_single_fill_access
+    - Stores options in batch.options (so programmable options still work)
+    - Immediately triggers parallel processing for that one item
+    - Returns a normal ProcessBatchResponse (status: processing)
+    """
+    try:
+        services = get_services()
+        template_service = services["template"]
+
+        # 1) Validate template UUID
+        try:
+            uuid.UUID(request.template_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="template_id must be a valid UUID")
+
+        # 2) Load template WITHOUT scoping it by user_id (because Flow 1 rules
+        #    allow access to official templates for other users if they have
+        #    a Library Pass or purchase)
+        template = template_service.get_template(request.template_id, current_user["id"])
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+
+        # 3) Enforce Flow 1 access rules (custom owner, free official, paid official)
+        ensure_template_single_fill_access(current_user["id"], template)
+
+        # 4) Validate required fields vs data
+        required_fields = set(template["field_mappings"].keys())
+        item_fields = set(request.data.keys())
+        missing = required_fields - item_fields
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required fields: {', '.join(sorted(missing))}",
+            )
+
+        # 5) Build batch_name and items list (ONE row)
+        batch_name = (request.batch_name or f"Single Fill - {template.get('name', 'Untitled')}").strip()
+        if not batch_name:
+            raise HTTPException(status_code=400, detail="batch_name cannot be empty")
+        if len(batch_name) > 200:
+            raise HTTPException(status_code=400, detail="batch_name too long (max 200 characters)")
+
+        items = [request.data]
+
+        validate_batch_size(items)
+
+        # 6) Create batch with options (these become batch.options and are used
+        #    by resolve_text_style/resolve_image_dims just like CSV batches)
+        options = request.options or {}
+
+        batch_id = services["batch"].create_batch(
+            user_id=current_user["id"],
+            template_id=request.template_id,
+            items=items,
+            batch_name=batch_name,
+            options=options,
+        )
+
+        # 7) Trigger the normal parallel batch processing for this ONE item
+        trigger_parallel_batch(
+            batch_id=batch_id,
+            user_id=current_user["id"],
+            template_id=request.template_id,
+        )
+
+        # 8) Immediately mark as processing
+        services["batch"].update_batch_status(batch_id, "processing")
+
+        # 9) Return SAME shape as /batch/{batch_id}/process
+        return ProcessBatchResponse(
+            message="Single-fill processing started",
+            batch_id=batch_id,
+            total_items=1,
+            status="processing",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Failed to start single-fill: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to start single-fill: {str(e)}")
