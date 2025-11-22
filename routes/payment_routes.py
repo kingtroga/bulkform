@@ -60,6 +60,24 @@ async def create_subscription_checkout(
     if req.plan_name not in ["starter", "pro"]:
         raise HTTPException(400, f"Invalid plan: {req.plan_name}. Use 'starter' or 'pro'.")
     
+    # Check if user already has an active subscription
+    profile = supabase.table("profiles").select(
+        "subscription_tier, subscription_status, stripe_subscription_id"
+    ).eq("id", user_id).single().execute()
+    
+    if profile.data:
+        current_tier = profile.data.get("subscription_tier")
+        current_status = profile.data.get("subscription_status")
+        
+        # Block if user has active subscription
+        if current_status == "active" and current_tier in ["starter", "pro"]:
+            logger.warning(f"❌ User {user_id} already has active {current_tier} subscription")
+            raise HTTPException(
+                400, 
+                f"You already have an active {current_tier} subscription. "
+                "Please cancel your current subscription before switching plans."
+            )
+    
     try:
         session = PaymentService.create_subscription_checkout(user_id, req.plan_name)
         return CheckoutSessionResponse(url=session.url, session_id=session.id)
@@ -106,6 +124,19 @@ async def create_template_checkout(
     user_id = current_user["id"]
     logger.info(f"🛒 Template checkout request - user: {user_id}, template: {template_id}")
     
+    # Check if user already owns this template
+    existing_purchase = supabase.table("template_purchases").select("id, expires_at").eq(
+        "profile_id", user_id
+    ).eq("template_id", template_id).execute()
+    
+    if existing_purchase.data:
+        expires_at = existing_purchase.data[0].get("expires_at")
+        logger.warning(f"❌ User {user_id} already owns template {template_id}")
+        raise HTTPException(
+            400,
+            f"You already own this template. It will automatically renew when it expires."
+        )
+    
     # Fetch template to get price_id
     result = supabase.table("pdf_templates").select("stripe_price_id, is_free").eq("id", template_id).single().execute()
     
@@ -137,6 +168,20 @@ async def create_library_pass_checkout(
     """
     user_id = current_user["id"]
     logger.info(f"🛒 Library pass checkout request - user: {user_id}")
+    
+    # Check if user already has library pass
+    profile = supabase.table("profiles").select(
+        "official_library_pass, official_library_pass_expires_at"
+    ).eq("id", user_id).single().execute()
+    
+    if profile.data and profile.data.get("official_library_pass"):
+        expires_at = profile.data.get("official_library_pass_expires_at")
+        logger.warning(f"❌ User {user_id} already has library pass (expires: {expires_at})")
+        raise HTTPException(
+            400,
+            "You already have an active Library Pass. "
+            "It will automatically renew when it expires."
+        )
     
     try:
         session = PaymentService.create_library_pass_checkout(user_id)
