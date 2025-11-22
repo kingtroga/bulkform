@@ -13,90 +13,90 @@ template_service = get_template_service()
 def ensure_template_single_fill_access(user_id: str, template: dict):
     """
     Flow 1 access rules:
-
-    - Custom template:
-        - Only the owner (template.user_id) can use it.
-    - Official template:
-        - If is_free or price == 0 and no stripe_price_id → free for all signed-in users.
-        - Otherwise, user must have:
-            - active Library Pass, OR
-            - active annual purchase for this template.
+    - Custom template: owner only
+    - Official free templates: allow all
+    - Paid official templates:
+        • Allow if user has active library pass
+        • Allow if user purchased this template within validity
     """
-    # 1) Custom templates → owner only
+    # ----------------------------------------------------------------------
+    # 1. CUSTOM TEMPLATES → owner only
+    # ----------------------------------------------------------------------
     if not template.get("is_official", False):
         if template.get("user_id") != user_id:
-            raise HTTPException(
-                status_code=403,
-                detail="You do not own this template."
-            )
+            raise HTTPException(status_code=403, detail="You do not own this template.")
         return
 
-    # 2) Official templates that are free
+    # ----------------------------------------------------------------------
+    # 2. OFFICIAL FREE TEMPLATES
+    # ----------------------------------------------------------------------
     if template.get("is_free") or (
         template.get("price") in (0, 0.0, None)
         and not template.get("stripe_price_id")
     ):
-        # Any signed-in user can use free official templates
         return
 
-    # 3) Official paid templates → check Library Pass, then per-template purchase
-    # Use the same Supabase client already hanging off template_service
+    # ----------------------------------------------------------------------
+    # 3. PAID OFFICIAL TEMPLATES -> check entitlements
+    # ----------------------------------------------------------------------
     sb = template_service.supabase
 
-    # 3a) Library Pass check
-    profile_res = (
-        sb
-        .table("profiles")
-        .select("official_library_pass, official_library_pass_expires_at")
-        .eq("id", user_id)
-        .single()
-        .execute()
-    )
-    profile = profile_res.data or {}
+    # ---- 3a. Check Library Pass ----
+    try:
+        profile_res = (
+            sb.table("profiles")
+            .select("official_library_pass, official_library_pass_expires_at")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        profile = (profile_res.data[0] if profile_res.data else {}) or {}
+    except Exception:
+        profile = {}
 
     has_pass = False
-    if profile.get("official_library_pass"):
-        exp_raw = profile.get("official_library_pass_expires_at")
+    exp_raw = profile.get("official_library_pass_expires_at")
+    if profile.get("official_library_pass") and exp_raw:
         try:
             exp_ts = int(exp_raw)
-        except (TypeError, ValueError):
-            exp_ts = 0
-
-        if exp_ts and exp_ts > int(time.time()):
-            has_pass = True
+            if exp_ts > int(time.time()):
+                has_pass = True
+        except Exception:
+            pass
 
     if has_pass:
         return
 
-    # 3b) Per-template purchase check
-    purchase_res = (
-        sb
-        .table("template_purchases")
-        .select("expires_at")
-        .eq("profile_id", user_id)
-        .eq("template_id", template["id"])
-        .single()
-        .execute()
-    )
-    purchase = purchase_res.data
+    # ---- 3b. Check per-template purchase ----
+    try:
+        purchase_res = (
+            sb.table("template_purchases")
+            .select("expires_at")
+            .eq("profile_id", user_id)
+            .eq("template_id", template["id"])
+            .limit(1)
+            .execute()
+        )
+        purchase = (purchase_res.data[0] if purchase_res.data else {}) or {}
+    except Exception:
+        purchase = {}
 
-    if purchase:
-        exp_raw = purchase.get("expires_at")
+    exp_raw = purchase.get("expires_at")
+    if exp_raw:
         try:
             exp_ts = int(exp_raw)
-        except (TypeError, ValueError):
-            exp_ts = 0
+            if exp_ts == 0 or exp_ts > int(time.time()):
+                return  # PURCHASE VALID
+        except Exception:
+            pass
 
-        # 0 or None → treat as "no expiry"
-        if exp_ts == 0 or exp_ts > int(time.time()):
-            return
-
-    # If we got here, user has no valid access
+    # ----------------------------------------------------------------------
+    # 4. DENY ACCESS → No pass, no purchase
+    # ----------------------------------------------------------------------
     raise HTTPException(
-        status_code=402,  # Payment Required → frontend can trigger Stripe purchase
+        status_code=402,
         detail="You need to purchase this template or get a Library Pass before you can fill it."
     )
-
 
 
 class EntitlementError(Exception):
