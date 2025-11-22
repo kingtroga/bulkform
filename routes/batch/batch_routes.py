@@ -1,7 +1,5 @@
 """
 Batch Routes - Main API Router
-API endpoints for batch PDF generation from CSV/Excel
-FIXED ZIP STREAMING - GUARANTEED TO WORK
 """
 
 from celery_tasks import trigger_parallel_batch, create_batch_zip_task
@@ -31,8 +29,11 @@ from services.batch_service import get_batch_service
 from services.csv_processor import get_csv_processor
 from services.template_service import get_template_service
 from services.auth import get_current_user
-from services.entitlement_service import ensure_template_single_fill_access
-
+from services.entitlement_service import (
+    ensure_template_single_fill_access,
+    get_entitlement_service,
+    EntitlementError,
+)
 
 from .batch_helpers import (
     get_services,
@@ -45,6 +46,8 @@ from .batch_processing import process_batch_sync
 from .batch_download import create_batch_zip
 
 router = APIRouter(prefix="/api/batch", tags=["Batch Processing"])
+
+entitlement_service = get_entitlement_service()
 
 
 def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
@@ -96,7 +99,6 @@ def create_streaming_zip_sync(
     print(f"\n📦 [create_streaming_zip_sync] Starting for batch {batch_id}")
     print(f"📦 Total items: {len(completed)}")
     
-    # Create temp zip file
     import tempfile
     with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
         zip_path = tmp_zip.name
@@ -117,12 +119,10 @@ def create_streaming_zip_sync(
                 filename = f"form_{item_index}.pdf"
                 
                 try:
-                    # Download from Supabase storage
                     pdf_bytes = pdf_processor.supabase.storage.from_(
                         pdf_processor.STORAGE_BUCKET
                     ).download(storage_path)
                     
-                    # Add to ZIP
                     zipf.writestr(filename, pdf_bytes)
                     files_added += 1
                     
@@ -135,7 +135,6 @@ def create_streaming_zip_sync(
         
         print(f"✅ ZIP created locally: {files_added} files")
         
-        # Upload to storage
         zip_size = os.path.getsize(zip_path)
         print(f"📤 Uploading {zip_size} bytes to Supabase...")
         
@@ -150,7 +149,6 @@ def create_streaming_zip_sync(
                 file_options={"content-type": "application/zip", "upsert": "true"}
             )
         
-        # Generate signed URL
         signed_url_response = pdf_processor.supabase.storage.from_(
             pdf_processor.STORAGE_BUCKET
         ).create_signed_url(zip_storage_path, 3600)
@@ -163,7 +161,6 @@ def create_streaming_zip_sync(
         return (zip_storage_path, signed_url)
     
     finally:
-        # Cleanup temp file
         if os.path.exists(zip_path):
             os.unlink(zip_path)
             print(f"🧹 Temp ZIP cleaned up")
@@ -174,12 +171,6 @@ async def stream_batch_zip(
     user_id: str,
     only_indices: Optional[Set[int]] = None,
 ):
-    """
-    Stream batch PDFs as ZIP without blocking.
-    
-    Now uses a Celery task to create the ZIP, then streams from storage.
-    This prevents blocking the event loop.
-    """
     batch_service = get_batch_service()
     
     batch = batch_service.get_batch(batch_id, user_id)
@@ -198,7 +189,6 @@ async def stream_batch_zip(
     
     print(f"\n🎬 [stream_batch_zip] Batch {batch_id} - {len(completed)} items")
     
-    # Offload ZIP creation to Celery (non-blocking)
     from celery_tasks import create_zip_task
     
     print(f"📤 Queueing ZIP creation to Celery...")
@@ -211,13 +201,11 @@ async def stream_batch_zip(
     print(f"⏳ Waiting for ZIP to be created (task: {task.id})...")
     
     try:
-        # Wait for Celery task with timeout
-        result = task.get(timeout=300)  # 5 minute timeout
+        result = task.get(timeout=300)
         zip_storage_path, signed_url = result
         
         print(f"✅ ZIP created, streaming from storage...")
         
-        # Now stream the ZIP from storage
         pdf_processor = PDFProcessor()
         
         zip_bytes = pdf_processor.supabase.storage.from_(
@@ -226,8 +214,7 @@ async def stream_batch_zip(
         
         print(f"✅ Downloaded ZIP ({len(zip_bytes)} bytes), streaming to client...")
         
-        # Stream in chunks
-        chunk_size = 65536  # 64KB chunks
+        chunk_size = 65536
         for i in range(0, len(zip_bytes), chunk_size):
             yield zip_bytes[i:i + chunk_size]
         
@@ -298,7 +285,6 @@ async def create_batch_from_csv(
     template_id: str = Form(..., description="Template UUID"),
     batch_name: str = Form(..., description="Batch name"),
     file: UploadFile = File(..., description="CSV/Excel file"),
-    # --- NEW: batch-wide defaults (optional) ---
     default_font: str | None = Form(None, description="Batch default font"),
     default_size: int | None = Form(None, description="Batch default font size"),
     default_align: str | None = Form(None, description="Batch default align: center|top|bottom"),
@@ -313,39 +299,35 @@ async def create_batch_from_csv(
     try:
         services = get_services()
 
-        # Validate file
         file_extension = validate_file_upload(file)
 
-        # Validate template_id
         try:
             uuid.UUID(template_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="template_id must be a valid UUID")
 
-        # Validate batch_name
         if not batch_name or len(batch_name.strip()) == 0:
             raise HTTPException(status_code=400, detail="batch_name cannot be empty")
         if len(batch_name) > 200:
             raise HTTPException(status_code=400, detail="batch_name too long (max 200 characters)")
 
-        # Get template (to derive required fields)
         template = services['template'].get_template(template_id, current_user['id'])
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
 
+        # ✅ enforce template entitlement (Flow 2 uses same rules as Flow 1)
+        ensure_template_single_fill_access(current_user["id"], template)
+
         required_fields = list(template['field_mappings'].keys())
 
-        # Read file content
         file_content = await file.read()
 
-        # Check file size
         if len(file_content) > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=400,
                 detail=f"File too large. Maximum size: {MAX_FILE_SIZE / 1024 / 1024}MB"
             )
 
-        # Parse CSV/Excel
         result = services['csv'].validate_and_parse(
             file_path=io.BytesIO(file_content),
             required_fields=required_fields,
@@ -359,13 +341,10 @@ async def create_batch_from_csv(
                 detail=f"CSV validation failed: {', '.join(result['errors'])}"
             )
 
-        # Validate batch size
         validate_batch_size(result['data'])
 
-        # --- NEW: build batch.options safely ---
         options: dict = {}
 
-        # Align normalization/validation
         allowed_align = {"center", "top", "bottom"}
         align_norm = None
         if default_align is not None:
@@ -376,7 +355,6 @@ async def create_batch_from_csv(
                     detail=f"Invalid default_align '{default_align}'. Allowed: {', '.join(sorted(allowed_align))}"
                 )
 
-        # Populate options only when provided (keeps payload clean)
         if default_font:
             options["default_font"] = default_font
 
@@ -402,19 +380,16 @@ async def create_batch_from_csv(
                 raise HTTPException(status_code=400, detail="default_image_height must be an integer")
 
         if image_defaults:
-            # Preferred nested shape
             options["image_defaults"] = image_defaults
-            # Optional compatibility keys (if you want both)
             options["default_image_width"] = image_defaults.get("width")
             options["default_image_height"] = image_defaults.get("height")
 
-        # Create batch (now includes options)
         batch_id = services['batch'].create_batch(
             user_id=current_user['id'],
             template_id=template_id,
             items=result['data'],
             batch_name=batch_name.strip(),
-            options=options if options else {}  # safe empty dict if nothing provided
+            options=options if options else {}
         )
 
         return BatchCreatedResponse(
@@ -430,7 +405,7 @@ async def create_batch_from_csv(
         raise
     except Exception as e:
         print(f"❌ Failed to create batch from CSV: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create batch: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create batch from CSV: {str(e)}")
 
 
 @router.post("", response_model=BatchCreatedResponse, status_code=201)
@@ -454,15 +429,15 @@ async def create_batch(
     try:
         services = get_services()
         
-        # Validate batch size
         validate_batch_size(request.items)
         
-        # Verify template exists
         template = services['template'].get_template(request.template_id, current_user['id'])
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
+
+        # ✅ enforce entitlement for JSON-created batches as well
+        ensure_template_single_fill_access(current_user["id"], template)
         
-        # Validate that items have required fields
         required_fields = set(template['field_mappings'].keys())
         for idx, item in enumerate(request.items):
             item_fields = set(item.keys())
@@ -473,7 +448,6 @@ async def create_batch(
                     detail=f"Item {idx} missing required fields: {', '.join(missing)}"
                 )
         
-        # Create batch
         batch_id = services['batch'].create_batch(
             user_id=current_user['id'],
             template_id=request.template_id,
@@ -524,7 +498,6 @@ async def process_batch(
     try:
         services = get_services()
         
-        # Verify ownership
         batch = services['batch'].get_batch(batch_id, current_user['id'])
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
@@ -534,6 +507,24 @@ async def process_batch(
                 status_code=400,
                 detail=f"Batch cannot be processed (status: {batch['status']})"
             )
+
+        # ✅ load template and enforce entitlement again at processing time
+        template = services["template"].get_template(batch["template_id"], current_user["id"])
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found for batch")
+
+        ensure_template_single_fill_access(current_user["id"], template)
+
+        # ✅ forms usage reservation for all pending items in this batch
+        pending_items = services["batch"].get_batch_items(batch_id, status="pending")
+        forms_needed = len(pending_items)
+        try:
+            entitlement_service.ensure_forms_available(
+                user_id=current_user["id"],
+                forms_needed=forms_needed,
+            )
+        except EntitlementError as ee:
+            raise HTTPException(status_code=ee.status_code, detail=ee.detail)
         
         trigger_parallel_batch(
             batch_id=batch_id,
@@ -541,7 +532,6 @@ async def process_batch(
             template_id=batch['template_id']
         )
         
-        # Update status immediately
         services['batch'].update_batch_status(batch_id, "processing")
         
         return ProcessBatchResponse(
@@ -561,6 +551,7 @@ async def process_batch(
 # ============================================================================
 # QUERY BATCH ENDPOINTS
 # ============================================================================
+
 @router.get("", response_model=BatchListResponse)
 async def list_batches(
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -575,7 +566,6 @@ async def list_batches(
         services = get_services()
         batch_service = services["batch"]
 
-        # NEW: service returns (rows_for_this_page, total_count)
         batches, total = batch_service.list_batches(
             user_id=current_user["id"],
             status=status,
@@ -587,7 +577,7 @@ async def list_batches(
 
         return BatchListResponse(
             batches=batch_responses,
-            total=total,          # ✅ real total, not len(current page)
+            total=total,
         )
 
     except Exception as e:
@@ -671,7 +661,6 @@ async def get_batch_items(
     try:
         services = get_services()
         
-        # Verify ownership
         batch = services['batch'].get_batch(batch_id, current_user['id'])
         if not batch:
             raise HTTPException(status_code=404, detail="Batch not found")
@@ -712,7 +701,6 @@ async def download_batch(
         
         pdf_processor = PDFProcessor()
         
-        # Refresh signed URLs
         completed_items = refresh_signed_urls(completed_items, pdf_processor)
         
         pdf_urls = [
@@ -727,7 +715,6 @@ async def download_batch(
             if item.get("pdf_url") or item.get("storage_path")
         ]
         
-        # Create zip if requested
         zip_url = None
         if create_zip and pdf_urls:
             print(f"\n{'='*80}")
@@ -782,7 +769,6 @@ async def retry_failed_items(
     try:
         services = get_services()
         
-        # Always fetch fresh stats
         progress = services['batch'].get_batch_progress(batch_id, current_user['id'])
         if 'error' in progress:
             raise HTTPException(status_code=404, detail=progress['error'])
@@ -790,11 +776,9 @@ async def retry_failed_items(
         failed = progress.get('failed', 0)
         pending = progress.get('pending', 0)
 
-        # Reset failed to pending (existing behavior)
         if failed > 0:
             services['batch'].retry_failed_items(batch_id, current_user['id'])
 
-        # NEW: also requeue any pending that never ran
         if pending > 0:
             services['batch'].reset_items_status(
                 batch_id=batch_id,
@@ -803,11 +787,9 @@ async def retry_failed_items(
                 to_status='pending'
             )
 
-        # If nothing to do:
         if failed == 0 and pending == 0:
             raise HTTPException(status_code=404, detail="Batch not found or no failed/pending items")
 
-        # Re-trigger Celery
         batch = services['batch'].get_batch(batch_id, current_user['id'])
         from celery_tasks import trigger_parallel_batch
         trigger_parallel_batch(
@@ -899,7 +881,6 @@ async def get_batch_stats(current_user: dict = Depends(get_current_user)):
 
 @router.get("/health")
 async def batch_health():
-    """Health check for batch service"""
     return {
         "service": "Batch Processing",
         "status": "operational",
@@ -931,6 +912,9 @@ async def single_fill_from_json(
     - Stores options in batch.options (so programmable options still work)
     - Immediately triggers parallel processing for that one item
     - Returns a normal ProcessBatchResponse (status: processing)
+
+    NOTE: Single-fill DOES NOT consume forms_included_in_plan.
+    Only bulk/batch processing consumes forms via /batch/{id}/process.
     """
     try:
         services = get_services()
@@ -942,9 +926,7 @@ async def single_fill_from_json(
         except ValueError:
             raise HTTPException(status_code=400, detail="template_id must be a valid UUID")
 
-        # 2) Load template WITHOUT scoping it by user_id (because Flow 1 rules
-        #    allow access to official templates for other users if they have
-        #    a Library Pass or purchase)
+        # 2) Load template
         template = template_service.get_template(request.template_id, current_user["id"])
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
@@ -973,10 +955,14 @@ async def single_fill_from_json(
 
         validate_batch_size(items)
 
-        # 6) Create batch with options (these become batch.options and are used
-        #    by resolve_text_style/resolve_image_dims just like CSV batches)
+        # 6) Options go into batch.options
         options = request.options or {}
 
+        # ❌ NO forms entitlement reservation here
+        # Single-fill is "entitlement only" (template access),
+        # not metered against forms_included_in_plan.
+
+        # 7) Create batch
         batch_id = services["batch"].create_batch(
             user_id=current_user["id"],
             template_id=request.template_id,
@@ -985,17 +971,16 @@ async def single_fill_from_json(
             options=options,
         )
 
-        # 7) Trigger the normal parallel batch processing for this ONE item
+        # 8) Trigger normal parallel batch processing for this ONE item
         trigger_parallel_batch(
             batch_id=batch_id,
             user_id=current_user["id"],
             template_id=request.template_id,
         )
 
-        # 8) Immediately mark as processing
+        # 9) Immediately mark as processing
         services["batch"].update_batch_status(batch_id, "processing")
 
-        # 9) Return SAME shape as /batch/{batch_id}/process
         return ProcessBatchResponse(
             message="Single-fill processing started",
             batch_id=batch_id,

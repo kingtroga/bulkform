@@ -33,9 +33,9 @@ from models.template_models import (
 )
 from services.template_service import get_template_service
 from services.auth import get_current_user
-from services.pdf_processor import PDFProcessor # Assuming PDFProcessor is available
+from services.pdf_processor import PDFProcessor
 from utils.utils import run_async 
-from starlette.responses import FileResponse # <-- NEW: For serving the image file
+from starlette.responses import FileResponse
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -57,46 +57,31 @@ def generate_template_preview_sync(template_id: str, pdf_url: str, temp_dir: str
     2. Converts the first page to a PNG thumbnail.
     3. Returns the path to the generated image.
     """
-    # 📝 Note: temp_dir is the full desired folder path (e.g., 'temp_pdf_uploads/template_previews/{id}')
-    # The session_id used by pdf_to_images must represent the sub-folder name.
-    
-    # Extract the necessary sub-folder name from the full temp_dir path
-    # Example: If temp_dir is 'temp_pdf_uploads/template_previews/b1f6...', 
-    # the target_session_id is 'template_previews/b1f6...'
     target_session_id = f"template_previews/{template_id}"
     
     local_pdf_path = f"{temp_dir}/{template_id}_original.pdf"
     preview_path = f"{temp_dir}/page_1.png"
 
     try:
-        # Create the temp directory structure needed for download and final output
         os.makedirs(temp_dir, exist_ok=True) 
 
-        # 1. Download PDF from storage (blocking I/O)
         pdf_processor.download_pdf_from_storage(
             pdf_url,
             local_pdf_path
         )
 
-        # 2. Convert first page to image (FIXED: Removed 'output_dir', Adjusted session_id)
-        # pdf_to_images creates its output folder based on session_id: 
-        # {self.TEMP_FOLDER}/{session_id}
         pdf_processor.pdf_to_images(
             pdf_path=local_pdf_path,
-            session_id=target_session_id, # <--- PASS THE CORRECT SUB-FOLDER STRUCTURE
+            session_id=target_session_id,
             page_numbers=[1],
-            # ❌ REMOVED: output_dir=temp_dir, 
-            # 📝 Rationale: This keyword is not supported and is now handled by session_id/self.TEMP_FOLDER logic.
         )
         
-        # 3. Check if the file was created.
         if not os.path.exists(preview_path):
             raise FileNotFoundError("PDF conversion failed to produce page 1 preview.")
 
         return preview_path
     
     finally:
-        # Simple cleanup
         if os.path.exists(local_pdf_path):
             os.remove(local_pdf_path)
 
@@ -119,17 +104,14 @@ async def preview_template_page_one(
     temp_dir = f"{pdf_processor.TEMP_FOLDER}/template_previews/{template_id}"
     preview_path = f"{temp_dir}/page_1.png"
     
-    # 1. Check Cache
     if os.path.exists(preview_path):
         return FileResponse(preview_path, media_type="image/png")
 
     try:
-        # 2. Get PDF URL from the template (must handle public access)
         pdf_url = template_service.get_template_pdf_url(template_id)
         if not pdf_url:
             raise HTTPException(status_code=404, detail="Template or PDF URL not found")
         
-        # 3. Generate preview asynchronously
         await run_async(
             generate_template_preview_sync,
             template_id,
@@ -137,7 +119,6 @@ async def preview_template_page_one(
             temp_dir
         )
         
-        # 4. Serve the generated image
         if not os.path.exists(preview_path):
             raise Exception("Preview file was not successfully created.")
 
@@ -146,7 +127,6 @@ async def preview_template_page_one(
     except HTTPException:
         raise
     except Exception as e:
-        # Log the error, but return a clean 500 error for the user
         print(f"❌ Preview generation failed for {template_id}: {str(e)}")
         raise HTTPException(
             status_code=500, 
@@ -188,11 +168,9 @@ async def create_template(
     Returns the created template ID
     """
     try:
-        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
         
-        # Parse field_mappings JSON
         import json
         try:
             field_mappings_dict = json.loads(field_mappings)
@@ -202,14 +180,12 @@ async def create_template(
                 detail="Invalid field_mappings JSON format"
             )
         
-        # Validate field mappings
         if not template_service.validate_field_mappings(field_mappings_dict):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid field mappings. Check structure and required fields."
             )
         
-        # Upload PDF to Supabase Storage
         from services.pdf_processor import PDFProcessor
         import uuid
         
@@ -217,16 +193,13 @@ async def create_template(
         user_id = current_user['id']
         template_id = str(uuid.uuid4())
         
-        # Read file content
         file_content = await file.read()
         
-        # Save to temp location
         import os
         temp_path = f"/tmp/template_{template_id}.pdf"
         with open(temp_path, "wb") as f:
             f.write(file_content)
         
-        # Upload to Supabase Storage: templates/{user_id}/{template_id}.pdf
         storage_path = f"templates/{user_id}/{template_id}.pdf"
         
         try:
@@ -238,20 +211,17 @@ async def create_template(
                 file_options={"content-type": "application/pdf"}
             )
         except Exception as e:
-            # If upload fails, clean up
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             raise Exception(f"Failed to upload PDF to storage: {str(e)}")
         
-        # Clean up temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
         
-        # Create template record with storage_path
         template_id = template_service.create_template(
             user_id=user_id,
             name=name,
-            pdf_url=storage_path,  # Store storage path
+            pdf_url=storage_path,
             field_mappings=field_mappings_dict,
             description=description
 
@@ -290,7 +260,6 @@ async def list_templates(
             offset=offset
         )
         
-        # Convert to response models
         template_responses = [
             TemplateResponse(**template) for template in templates
         ]
@@ -307,11 +276,9 @@ async def list_templates(
 @router.get("/all", response_model=AllTemplatesResponse)
 async def list_all_templates(
     current_user: dict = Depends(get_current_user),
-    # Official pagination + optional filter
     page_official: int = 1,
     page_size_official: int = 24,
     category: Optional[str] = None,
-    # Custom pagination
     page_custom: int = 1,
     page_size_custom: int = 24,
 ):
@@ -321,13 +288,12 @@ async def list_all_templates(
       - user's custom (private, active)
     """
     try:
-        # Official
         official_items, official_total = template_service.list_official_templates_paged(
             page=page_official,
             page_size=page_size_official,
             category=category,
         )
-        # Custom
+        
         custom_items, custom_total = template_service.list_templates_paged(
             user_id=current_user["id"],
             page=page_custom,
@@ -337,7 +303,6 @@ async def list_all_templates(
         official = [TemplateResponse(**t) for t in official_items]
         custom   = [TemplateResponse(**t) for t in custom_items]
 
-        # meta
         total_pages_official = (official_total + page_size_official - 1) // page_size_official if page_size_official else 0
         total_pages_custom   = (custom_total   + page_size_custom   - 1) // page_size_custom if page_size_custom else 0
 
@@ -348,19 +313,15 @@ async def list_all_templates(
         has_next_custom = page_custom < max(1, total_pages_custom)
 
         return AllTemplatesResponse(
-            # data
             official=official,
             custom=custom,
-            # totals
             total_official=official_total,
             total_custom=custom_total,
-            # official meta
             page_official=page_official,
             page_size_official=page_size_official,
             total_pages_official=total_pages_official,
             has_prev_official=has_prev_official,
             has_next_official=has_next_official,
-            # custom meta
             page_custom=page_custom,
             page_size_custom=page_size_custom,
             total_pages_custom=total_pages_custom,
@@ -385,13 +346,11 @@ async def search_templates(
     Searches in user's custom templates
     """
     try:
-        # Use Supabase ilike for case-insensitive partial search
         result = (
                 template_service.supabase
                 .table("pdf_templates")
                 .select("*")
                 .or_(
-                    # match official templates by name OR user's own templates by name
                     f"and(is_official.eq.true,name.ilike.*{query}*),and(user_id.eq.{current_user['id']},name.ilike.*{query}*)"
                 )
                 .execute()
@@ -503,7 +462,6 @@ async def update_template(
     print(f"[UPDATE_TEMPLATE] user={current_user.get('id')} template_id={template_id} payload={request.dict(exclude_unset=True)}")
 
     try:
-        # 0) Load & guard
         existing = template_service.get_template(template_id, current_user["id"])
         if not existing:
             print(f"[UPDATE_TEMPLATE] Template not found or unauthorized for user={current_user.get('id')}")
@@ -515,7 +473,6 @@ async def update_template(
 
         updates: Dict[str, Any] = {}
 
-        # 1) Basic fields
         if request.name is not None:
             updates["name"] = request.name
         if request.description is not None:
@@ -527,17 +484,14 @@ async def update_template(
             updates["category"] = cat
         print(f"[UPDATE_TEMPLATE] Basic updates collected: {updates}")
 
-        # 2) Field mappings merge/delete
         if request.field_mappings is not None or (request.remove_fields and len(request.remove_fields) > 0):
             existing_mappings = dict(existing.get("field_mappings", {}))
             print(f"[UPDATE_TEMPLATE] Existing mappings count={len(existing_mappings)}")
 
-            # deletions
             for k in (request.remove_fields or []):
                 existing_mappings.pop(k, None)
                 print(f"[UPDATE_TEMPLATE] Removed mapping key={k}")
 
-            # upserts
             for k, v in (request.field_mappings or {}).items():
                 existing_mappings[k] = v
                 print(f"[UPDATE_TEMPLATE] Upserted mapping key={k}")
@@ -552,7 +506,6 @@ async def update_template(
             print(f"[UPDATE_TEMPLATE] No valid fields to update for template={template_id}")
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        # 3) Persist
         print(f"[UPDATE_TEMPLATE] Applying updates: {list(updates.keys())}")
         updated_ok = template_service.update_template(
             template_id=template_id,
@@ -588,7 +541,6 @@ async def delete_template(
     Idempotent: deleting an already-inactive template still returns 200.
     """
     try:
-        # Fetch template meta we need in one query
         row = (
             template_service.supabase.table("pdf_templates")
             .select("id,user_id,is_official,active")
@@ -609,14 +561,12 @@ async def delete_template(
         if row["user_id"] != current_user["id"]:
             raise HTTPException(status_code=403, detail="Not the owner")
 
-        # Soft delete via service (sets active = false)
         success = template_service.soft_delete_template(
             template_id=template_id,
             user_id=current_user["id"]
         )
 
         if not success:
-            # If update matched zero rows, treat as not found/unauthorized
             raise HTTPException(status_code=404, detail="Template not found or unauthorized")
         
         return TemplateDeletedResponse(
@@ -723,11 +673,9 @@ async def create_official_template(
     - **description**: Optional description
     """
     try:
-        # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
         
-        # Parse field_mappings JSON
         import json
         try:
             field_mappings_dict = json.loads(field_mappings)
@@ -737,14 +685,12 @@ async def create_official_template(
                 detail="Invalid field_mappings JSON format"
             )
         
-        # Validate field mappings
         if not template_service.validate_field_mappings(field_mappings_dict):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid field mappings. Check structure and required fields."
             )
         
-        # Upload PDF to Supabase Storage
         from services.pdf_processor import PDFProcessor
         import uuid
         
@@ -752,10 +698,8 @@ async def create_official_template(
         user_id = current_user['id']
         template_id = str(uuid.uuid4())
         
-        # Read file content
         file_content = await file.read()
         
-        # Upload to Supabase Storage: official_templates/{official_form_id}/{template_id}.pdf
         storage_path = f"official_templates/{official_form_id}/{template_id}.pdf"
         
         try:
@@ -769,12 +713,10 @@ async def create_official_template(
         except Exception as e:
             raise Exception(f"Failed to upload PDF to storage: {str(e)}")
         
-        # Create Stripe Product and Price (if price > 0)
         stripe_price_id = None
         
         if price > 0:
             try:
-                # Create Stripe Product
                 stripe_product = stripe.Product.create(
                     name=f"BulkForm {name} Template",
                     description=f"Annual subscription to {name} official template",
@@ -785,10 +727,9 @@ async def create_official_template(
                     }
                 )
                 
-                # Create Stripe Price (annual recurring)
                 stripe_price = stripe.Price.create(
                     product=stripe_product.id,
-                    unit_amount=int(price * 100),  # Convert dollars to cents
+                    unit_amount=int(price * 100),
                     currency="usd",
                     recurring={
                         "interval": "year",
@@ -806,7 +747,6 @@ async def create_official_template(
                 print(f"✅ Stripe Price Created: {stripe_price_id} (${price}/year)")
                 
             except stripe.error.StripeError as e:
-                # Rollback storage upload on Stripe failure
                 try:
                     pdf_processor.supabase.storage.from_(
                         pdf_processor.STORAGE_BUCKET
@@ -819,7 +759,6 @@ async def create_official_template(
                     detail=f"Stripe integration failed: {str(e)}"
                 )
         
-        # Determine complexity from price (reverse engineering)
         if price <= 10:
             complexity = "simple"
         elif price <= 20:
@@ -827,11 +766,10 @@ async def create_official_template(
         else:
             complexity = "complex"
         
-        # Create official template in database (will check admin status internally)
         template_id = template_service.create_official_template(
             user_id=user_id,
             name=name,
-            pdf_url=storage_path,  # Store storage path
+            pdf_url=storage_path,
             field_mappings=field_mappings_dict,
             official_form_id=official_form_id,
             category=category,
@@ -848,7 +786,6 @@ async def create_official_template(
         )
     
     except ValueError as e:
-        # Admin check failed
         raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
@@ -889,23 +826,19 @@ async def convert_template_format(
     
     for page_num, fields in data.fields.items():
         for field in fields:
-            # Skip fields with no name
             if not field.get('name') or not field['name'].strip():
                 continue
             
-            # Sanitize base name
             import re
             base_name = re.sub(r'[^a-zA-Z0-9_]', '_', field['name'].strip()).lower()
             
             field_name = base_name
             index = 1
             
-            # Handle duplicates
             while field_name in field_mappings:
                 index += 1
                 field_name = f"{base_name}_{index}"
             
-            # Base structure
             mapping = {
                 "page": int(page_num),
                 "x": field['gridX'],
