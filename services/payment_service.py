@@ -18,7 +18,7 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe.api_version = "2024-12-18.acacia"
 
 # Environment variables
-APP_URL = os.getenv("APP_URL", "http://localhost:8001")
+APP_URL = "http://localhost:8001"
 PRICE_STARTER_MONTHLY = os.getenv("PRICE_STARTER_MONTHLY")
 PRICE_PRO_MONTHLY = os.getenv("PRICE_PRO_MONTHLY")
 PRICE_PAYG = os.getenv("PRICE_PAYG")
