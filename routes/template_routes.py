@@ -331,6 +331,59 @@ async def list_all_templates(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to list templates: {str(e)}")
+    
+@router.get("/search-for-dropdown")
+async def search_templates_for_dropdown(
+    query: str = Query(default="", description="Search query"),
+    limit: int = Query(default=20, ge=1, le=50, description="Max results"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Lightweight template search for dropdowns
+    
+    - Returns max 20 results (enough for a dropdown)
+    - Searches both official and custom templates
+    - Only returns: id, name, is_official (minimal data)
+    """
+    try:
+        query_filter = f"%{query}%" if query else "%"
+        
+        # Search official templates
+        official_result = (
+            template_service.supabase
+            .table("pdf_templates")
+            .select("id, name, is_official")
+            .eq("is_official", True)
+            .eq("active", True)
+            .ilike("name", query_filter)
+            .limit(limit // 2)  # Half for official
+            .execute()
+        )
+        
+        # Search user's custom templates
+        custom_result = (
+            template_service.supabase
+            .table("pdf_templates")
+            .select("id, name, is_official")
+            .eq("user_id", current_user["id"])
+            .eq("is_official", False)
+            .eq("active", True)
+            .ilike("name", query_filter)
+            .limit(limit // 2)  # Half for custom
+            .execute()
+        )
+        
+        official = official_result.data if official_result.data else []
+        custom = custom_result.data if custom_result.data else []
+        
+        return {
+            "templates": official + custom,
+            "total": len(official) + len(custom),
+            "showing_partial": len(official) + len(custom) >= limit
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 
 @router.get("/search")

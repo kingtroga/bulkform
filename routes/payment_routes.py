@@ -246,8 +246,9 @@ async def create_subscription_checkout(
     if profile.data:
         current_tier = profile.data.get("subscription_tier")
         current_status = profile.data.get("subscription_status")
+        stripe_sub_id = profile.data.get("stripe_subscription_id")
         
-        # Block if user has active subscription
+        # Block ONLY if status is "active" (not "canceled")
         if current_status == "active" and current_tier in ["starter", "pro"]:
             logger.warning(f"❌ User {user_id} already has active {current_tier} subscription")
             raise HTTPException(
@@ -255,6 +256,16 @@ async def create_subscription_checkout(
                 f"You already have an active {current_tier} subscription. "
                 "Please cancel your current subscription before switching plans."
             )
+        
+        # If status is "canceled", cancel the old subscription in Stripe first
+        if current_status == "canceled" and stripe_sub_id:
+            logger.info(f"♻️ User has canceled subscription. Canceling immediately in Stripe before creating new one.")
+            try:
+                import stripe
+                stripe.Subscription.delete(stripe_sub_id)
+                logger.info(f"✅ Old subscription {stripe_sub_id} deleted")
+            except Exception as e:
+                logger.warning(f"Failed to delete old subscription: {e}")
     
     try:
         session = PaymentService.create_subscription_checkout(user_id, req.plan_name)
@@ -262,7 +273,6 @@ async def create_subscription_checkout(
     except Exception as e:
         logger.error(f"Failed to create subscription checkout: {e}", exc_info=True)
         raise HTTPException(400, str(e))
-
 
 @router.post("/payg/checkout", response_model=CheckoutSessionResponse)
 async def create_payg_checkout(
