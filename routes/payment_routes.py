@@ -389,6 +389,10 @@ async def stripe_webhook(request: Request):
     Stripe webhook endpoint.
     
     This receives events from Stripe when payments succeed/fail.
+    
+    Handles:
+    - checkout.session.completed: Initial purchases (subscriptions, PAYG, templates, library pass)
+    - invoice.payment_succeeded: Subscription renewals (monthly/annual auto-billing)
     """
     logger.info("📨 Webhook received")
     
@@ -412,7 +416,7 @@ async def stripe_webhook(request: Request):
     
     logger.info(f"📬 Event type: {event_type}")
     
-    # Handle checkout completion
+    # Handle checkout completion (initial purchases)
     if event_type == "checkout.session.completed":
         logger.info("🎯 Processing checkout.session.completed")
         try:
@@ -420,6 +424,16 @@ async def stripe_webhook(request: Request):
             logger.info("✅ Checkout processed successfully")
         except Exception as e:
             logger.error(f"❌ Error processing checkout: {e}", exc_info=True)
+            # Still return 200 to prevent Stripe retries
+    
+    # Handle subscription renewals (auto-billing)
+    elif event_type == "invoice.payment_succeeded":
+        logger.info("🔄 Processing invoice.payment_succeeded (renewal)")
+        try:
+            PaymentService.handle_subscription_renewal(event_data)
+            logger.info("✅ Renewal processed successfully")
+        except Exception as e:
+            logger.error(f"❌ Error processing renewal: {e}", exc_info=True)
             # Still return 200 to prevent Stripe retries
     
     else:
