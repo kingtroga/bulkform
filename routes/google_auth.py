@@ -73,35 +73,37 @@ async def google_callback(
             )
         
         user_metadata = getattr(response.user, 'user_metadata', {}) or {}
+        app_metadata = getattr(response.user, 'app_metadata', {}) or {}
 
         access_token = response.session.access_token
         refresh_token = response.session.refresh_token
+        
+        # Build identities array for auth provider detection
+        identities = []
+        if hasattr(response.user, 'identities') and response.user.identities:
+            identities = [
+                {
+                    "provider": identity.provider,
+                    "id": getattr(identity, 'id', None)
+                }
+                for identity in response.user.identities
+            ]
+        
         user = {
             "id": response.user.id,
             "email": response.user.email,
             "name": user_metadata.get("full_name") or user_metadata.get("name", ""),
             "avatar": user_metadata.get("avatar_url") or user_metadata.get("picture", ""),
-            "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None
+            "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None,
+            # Add identity info for password status detection
+            "identities": identities,
+            "app_metadata": app_metadata,
+            "user_metadata": user_metadata
         }
 
-        #return {
-        #    "access_token": response.session.access_token,
-        #    "refresh_token": response.session.refresh_token,
-        #    "expires_in": getattr(response.session, 'expires_in', 3600),
-        #    "token_type": "bearer",
-        #    "user": {
-        #        "id": response.user.id,
-        #        "email": response.user.email,
-        #        "name": user_metadata.get("full_name") or user_metadata.get("name", ""),
-        #        "avatar": user_metadata.get("avatar_url") or user_metadata.get("picture", ""),
-        #        "email_verified": getattr(response.user, 'email_confirmed_at', None) is not None
-        #    },
-        #    "message": "Google authentication successful"
-        #}
-
         return RedirectResponse(
-                url=f"{FRONTEND_URL}/auth/callback?access_token={access_token}&refresh_token={refresh_token}&user={json.dumps(user)}"
-            )
+            url=f"{FRONTEND_URL}/auth/callback?access_token={access_token}&refresh_token={refresh_token}&user={json.dumps(user)}"
+        )
         
     except HTTPException:
         raise
@@ -113,7 +115,6 @@ async def google_callback(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Authentication failed: {str(e)}"
         )
-
 
 @router.get("/debug")
 async def google_debug():
