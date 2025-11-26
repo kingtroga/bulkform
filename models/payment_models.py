@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
-
+from datetime import datetime
 
 # ============================================================================
 # Request Models
@@ -40,3 +40,14 @@ class CheckoutSessionResponse(BaseModel):
 class StripeConfigResponse(BaseModel):
     """Response with Stripe publishable key"""
     publishable_key: str
+
+
+class TemplatePurchaseResponse(BaseModel):
+    id: str
+    template_id: str
+    template_name: str
+    purchase_type: str
+    amount_paid: int
+    purchased_at: datetime
+    expires_at: Optional[datetime] = None
+    is_active: bool

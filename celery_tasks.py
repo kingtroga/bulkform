@@ -1,8 +1,9 @@
 """
-Celery Tasks - PARALLEL PDF PROCESSING
-Each PDF is processed independently in parallel by different workers
+Celery Tasks - PARALLEL PDF PROCESSING WITH FORMS CONSUMPTION
+Each PDF is processed independently and consumes 1 form atomically
 
-SPEED: 100 PDFs in ~2-5 minutes with 10 workers (vs 43 mins sequential)
+CRITICAL: Forms are consumed AFTER successful PDF creation (not before)
+to ensure accurate billing even if some PDFs fail.
 """
 
 from celery_config import celery_app
@@ -622,9 +623,15 @@ def process_single_pdf_task(
     item_index: int,
     client_data: Dict,
     template_id: str,
-    user_id: str
+    user_id: str,
+    skip_forms_consumption: bool = False
 ):
-    """Process a SINGLE PDF in parallel"""
+    """
+    Process a SINGLE PDF in parallel.
+    
+    ✅ CRITICAL: Consumes 1 form AFTER successful PDF creation.
+    This ensures accurate billing even if some PDFs fail.
+    """
     task_start = time.time()
     print(f"\n🚀 [Worker {self.request.id[:8]}] Processing item {item_index}")
     
@@ -640,6 +647,9 @@ def process_single_pdf_task(
         if not template:
             raise Exception(f"Template not found: {template_id}")
         
+        # ============================================================
+        # STEP 1: Create the PDF
+        # ============================================================
         pdf_start = time.time()
         result = fill_single_pdf_sync(
             template=template,
@@ -651,6 +661,27 @@ def process_single_pdf_task(
         )
         pdf_time = time.time() - pdf_start
         
+        # ============================================================
+        # STEP 2: ✅ CONSUME 1 FORM (atomic, after success)
+        # ============================================================
+        if not skip_forms_consumption:
+            from services.entitlement_service import get_entitlement_service
+            entitlement_service = get_entitlement_service()
+            
+            try:
+                consumed = entitlement_service.consume_forms(user_id=user_id, count=1)
+                forms_remaining = consumed.get('forms_remaining', 'unknown')
+                print(f"💰 [Worker {self.request.id[:8]}] ✅ Consumed 1 form. Remaining: {forms_remaining}")
+            except Exception as consume_error:
+                # ⚠️  This is critical - log but don't fail the task
+                # The PDF was successfully created, this is a billing/tracking error
+                print(f"⚠️  [Worker {self.request.id[:8]}] ❌ Forms consumption FAILED: {consume_error}")
+                print(f"⚠️  PDF was created successfully but billing not recorded!")
+                # You might want to add this to a dead-letter queue or alert system
+        
+        # ============================================================
+        # STEP 3: Mark item as completed
+        # ============================================================
         batch_service.update_batch_item(
             item_id,
             "completed",
@@ -708,6 +739,8 @@ def finalize_batch_task(batch_id: str, user_id: str):
             new_status = 'completed' if failed == 0 else 'completed_with_errors'
             batch_service.update_batch_status(batch_id, new_status)
             print(f"✅ Batch {batch_id} marked {new_status}")
+            if total > 1:
+                print(f"💰 Total forms consumed: {completed}")
         else:
             batch_service.update_batch_status(batch_id, "processing")
             print(f"⏳ Batch {batch_id} still in progress; leaving status as processing")
@@ -781,7 +814,8 @@ def create_batch_zip_task(
 # HELPER FUNCTION - Trigger parallel processing
 # ============================================================================
 
-def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
+def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str, skip_forms_consumption: bool = False):
+    # ...
     """Trigger parallel processing of entire batch"""
     print(f"\n⚡ PARALLEL PROCESSING START: {batch_id}")
     start_time = time.time()
@@ -807,7 +841,8 @@ def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
             item_index=item['item_index'],
             client_data=item['client_data'],
             template_id=template_id,
-            user_id=user_id
+            user_id=user_id,
+            skip_forms_consumption=skip_forms_consumption
         )
         for item in items
     )
@@ -820,5 +855,6 @@ def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
     print(f"✅ {len(items)} tasks queued in {queue_time:.2f}s")
     print(f"🔥 Workers will process in parallel!")
     print(f"⏱️  Expected time with 10 workers: ~{len(items) / 10 * 3:.0f}s ({len(items) / 10 * 3 / 60:.1f} min)")
+    print(f"💰 Will consume {len(items)} forms when completed")
     
     return job.id

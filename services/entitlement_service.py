@@ -369,6 +369,65 @@ class EntitlementService:
             "forms_needed": forms_needed,
             "remaining": forms_available - forms_needed
         }
+    
+    def consume_forms(self, user_id: str, count: int = 1) -> dict:
+        """
+        Atomically consume forms from user's quota.
+        Called by Celery worker AFTER successful PDF creation.
+        
+        Args:
+            user_id: User's UUID
+            count: Number of forms to consume (default 1)
+            
+        Returns:
+            dict with 'forms_remaining' and 'forms_consumed'
+            
+        Raises:
+            EntitlementError: If user has insufficient forms
+        """
+        try:
+            print(f"💰 Consuming {count} form(s) for user {user_id[:8]}...")
+            
+            # Call Supabase RPC that handles atomic decrement
+            result = self.supabase.rpc(
+                'consume_user_forms',
+                {'p_user_id': user_id, 'p_count': count}
+            ).execute()
+            
+            if not result.data:
+                raise EntitlementError(
+                    status_code=500,
+                    detail="Failed to consume forms - no data returned"
+                )
+            
+            forms_remaining = result.data.get('forms_remaining', 0)
+            forms_consumed = result.data.get('forms_consumed', count)
+            
+            print(f"💰 ✅ Consumed {forms_consumed}. Remaining: {forms_remaining}")
+            
+            return {
+                'forms_remaining': forms_remaining,
+                'forms_consumed': forms_consumed
+            }
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            if 'insufficient' in error_msg:
+                raise EntitlementError(
+                    status_code=403,
+                    detail=f"Insufficient forms. Need {count} form(s).",
+                    forms_available=0,
+                    forms_needed=count
+                )
+            
+            if 'function' in error_msg and 'does not exist' in error_msg:
+                raise Exception(
+                    "Database function 'consume_user_forms' missing. "
+                    "Run the SQL migration first."
+                )
+            
+            raise Exception(f"Failed to consume forms: {str(e)}")
 
 
 _entitlement_service: Optional[EntitlementService] = None

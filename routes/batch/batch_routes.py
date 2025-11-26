@@ -1,5 +1,17 @@
 """
-Batch Routes - With Template Entitlement + Forms Checks for Bulk Processing
+Batch Routes - With Template Entitlement Check (Forms Consumed in Worker)
+
+✅ TWO-LAYER ENTITLEMENT MODEL:
+1. Template Access (checked at batch creation/processing start)
+   - Custom templates: Always free
+   - Official templates (free): Always accessible
+   - Official templates (paid): Requires single purchase OR Library Pass
+
+2. Forms Consumption (enforced ATOMICALLY in Celery worker)
+   - Checked at batch creation (pre-flight validation only)
+   - Actually consumed AFTER each PDF is successfully created
+   - 1 form consumed per successful PDF
+   - Failed PDFs don't consume forms
 """
 
 from celery_tasks import trigger_parallel_batch, create_batch_zip_task
@@ -70,212 +82,6 @@ def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
     return indices
 
 
-def create_streaming_zip_sync(
-    batch_id: str,
-    user_id: str,
-    only_indices: Optional[Set[int]] = None,
-) -> tuple:
-    """
-    Create ZIP file synchronously (for Celery task).
-    Returns (zip_storage_path, signed_url) for immediate download.
-    """
-    batch_service = get_batch_service()
-    pdf_processor = PDFProcessor()
-    
-    batch = batch_service.get_batch(batch_id, user_id)
-    if not batch:
-        raise Exception(f"Batch not found: {batch_id}")
-    
-    completed = batch_service.get_batch_items(batch_id, status="completed")
-    if not completed:
-        raise Exception(f"No completed items in batch {batch_id}")
-    
-    if only_indices:
-        completed = [
-            item for item in completed 
-            if item.get("item_index") in only_indices
-        ]
-    
-    print(f"\n📦 [create_streaming_zip_sync] Starting for batch {batch_id}")
-    print(f"📦 Total items: {len(completed)}")
-    
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
-        zip_path = tmp_zip.name
-    
-    try:
-        import zipfile as zf_module
-        files_added = 0
-        
-        with zf_module.ZipFile(zip_path, 'w', zf_module.ZIP_DEFLATED) as zipf:
-            for item in completed:
-                storage_path = item.get("storage_path")
-                item_index = item.get("item_index", 0)
-                
-                if not storage_path:
-                    print(f"   ⚠️ Item {item_index}: No storage_path, skipping")
-                    continue
-                
-                filename = f"form_{item_index}.pdf"
-                
-                try:
-                    pdf_bytes = pdf_processor.supabase.storage.from_(
-                        pdf_processor.STORAGE_BUCKET
-                    ).download(storage_path)
-                    
-                    zipf.writestr(filename, pdf_bytes)
-                    files_added += 1
-                    
-                    if files_added % 10 == 0:
-                        print(f"   ✅ Added {files_added} files...")
-                    
-                except Exception as e:
-                    print(f"   ⚠️ Item {item_index}: Failed - {str(e)}")
-                    continue
-        
-        print(f"✅ ZIP created locally: {files_added} files")
-        
-        zip_size = os.path.getsize(zip_path)
-        print(f"📤 Uploading {zip_size} bytes to Supabase...")
-        
-        zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
-        
-        with open(zip_path, 'rb') as f:
-            pdf_processor.supabase.storage.from_(
-                pdf_processor.STORAGE_BUCKET
-            ).upload(
-                path=zip_storage_path,
-                file=f.read(),
-                file_options={"content-type": "application/zip", "upsert": "true"}
-            )
-        
-        signed_url_response = pdf_processor.supabase.storage.from_(
-            pdf_processor.STORAGE_BUCKET
-        ).create_signed_url(zip_storage_path, 3600)
-        
-        signed_url = signed_url_response['signedURL']
-        
-        print(f"✅ ZIP uploaded and ready for download")
-        print(f"✅ URL: {signed_url[:80]}...")
-        
-        return (zip_storage_path, signed_url)
-    
-    finally:
-        if os.path.exists(zip_path):
-            os.unlink(zip_path)
-            print(f"🧹 Temp ZIP cleaned up")
-
-
-async def stream_batch_zip(
-    batch_id: str,
-    user_id: str,
-    only_indices: Optional[Set[int]] = None,
-):
-    batch_service = get_batch_service()
-    
-    batch = batch_service.get_batch(batch_id, user_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
-    
-    completed = batch_service.get_batch_items(batch_id, status="completed")
-    if not completed:
-        raise HTTPException(status_code=400, detail="No completed items in batch")
-    
-    if only_indices:
-        completed = [
-            item for item in completed 
-            if item.get("item_index") in only_indices
-        ]
-    
-    print(f"\n🎬 [stream_batch_zip] Batch {batch_id} - {len(completed)} items")
-    
-    from celery_tasks import create_zip_task
-    
-    print(f"📤 Queueing ZIP creation to Celery...")
-    task = create_zip_task.delay(
-        batch_id=batch_id,
-        user_id=user_id,
-        only_indices=list(only_indices) if only_indices else None
-    )
-    
-    print(f"⏳ Waiting for ZIP to be created (task: {task.id})...")
-    
-    try:
-        result = task.get(timeout=300)
-        zip_storage_path, signed_url = result
-        
-        print(f"✅ ZIP created, streaming from storage...")
-        
-        pdf_processor = PDFProcessor()
-        
-        zip_bytes = pdf_processor.supabase.storage.from_(
-            pdf_processor.STORAGE_BUCKET
-        ).download(zip_storage_path)
-        
-        print(f"✅ Downloaded ZIP ({len(zip_bytes)} bytes), streaming to client...")
-        
-        chunk_size = 65536
-        for i in range(0, len(zip_bytes), chunk_size):
-            yield zip_bytes[i:i + chunk_size]
-        
-        print(f"✅ Stream complete")
-    
-    except Exception as e:
-        print(f"❌ ZIP creation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"ZIP creation failed: {str(e)}")
-
-
-@router.get("/{batch_id}/download-live")
-async def download_batch_live(
-    batch_id: str,
-    only: Optional[str] = Query(None, description="Filter items: 1,2,7-10"),
-    chunk_size: Optional[int] = Query(None, ge=1, le=500),
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Stream batch PDFs as live ZIP without buffering.
-    
-    🔒 Requires authentication
-    
-    Query Parameters:
-    - only: Filter items (e.g., "1,2,7-10")
-    - chunk_size: Not used yet (placeholder for future multi-zip support)
-    """
-    try:
-        batch_service = get_batch_service()
-        
-        batch = batch_service.get_batch(batch_id, current_user['id'])
-        if not batch:
-            raise HTTPException(status_code=404, detail="Batch not found")
-        
-        only_indices = None
-        if only:
-            try:
-                only_indices = parse_item_filter(only)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e))
-        
-        filename = f"{batch['batch_name']}.zip"
-        
-        print(f"\n🚀 download_batch_live endpoint hit")
-        print(f"   batch_id: {batch_id}")
-        print(f"   filename: {filename}")
-        
-        return StreamingResponse(
-            stream_batch_zip(batch_id, current_user['id'], only_indices),
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Stream failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Stream failed: {str(e)}")
-
-
 # ============================================================================
 # CREATE BATCH ENDPOINTS
 # ============================================================================
@@ -297,7 +103,8 @@ async def create_batch_from_csv(
     
     🔒 Two-layer check:
     1. Template entitlement (must own template or have Library Pass for paid official templates)
-    2. Forms availability (must have enough forms_included_in_plan for bulk processing)
+    2. Forms availability PRE-FLIGHT check (ensures user has enough forms before creating batch)
+       - Actual consumption happens ATOMICALLY in Celery worker (1 per successful PDF)
     """
     try:
         services = get_services()
@@ -356,8 +163,9 @@ async def create_batch_from_csv(
 
         validate_batch_size(result['data'])
 
-        # ✅ STEP 2: Check forms availability BEFORE creating batch
-        # This prevents orphaned batches when user lacks forms
+        # ✅ STEP 2: PRE-FLIGHT Check forms availability
+        # This prevents creating batches user can't process
+        # Actual consumption happens in Celery worker (atomic, per-PDF)
         forms_needed = len(result['data'])
         try:
             entitlement_service.ensure_forms_available(
@@ -430,7 +238,7 @@ async def create_batch_from_csv(
             total_items=result['row_count'],
             status="pending",
             options=options,
-            message=f"Batch created with {result['row_count']} items. Use POST /batch/{batch_id}/process to start."
+            message=f"Batch created with {result['row_count']} items. Use POST /batch/{batch_id}/process to start. Forms will be consumed as PDFs are created."
         )
 
     except HTTPException:
@@ -450,7 +258,7 @@ async def create_batch(
     
     🔒 Two-layer check:
     1. Template entitlement
-    2. Forms availability
+    2. Forms availability (pre-flight check)
     """
     try:
         services = get_services()
@@ -481,7 +289,7 @@ async def create_batch(
                     detail=f"Item {idx} missing required fields: {', '.join(missing)}"
                 )
         
-        # ✅ STEP 2: Forms availability
+        # ✅ STEP 2: Pre-flight forms availability check
         forms_needed = len(request.items)
         try:
             entitlement_service.ensure_forms_available(
@@ -510,7 +318,7 @@ async def create_batch(
             batch_name=request.batch_name,
             total_items=len(request.items),
             status="pending",
-            message=f"Batch created with {len(request.items)} items. Use POST /batch/{batch_id}/process to start."
+            message=f"Batch created with {len(request.items)} items. Use POST /batch/{batch_id}/process to start. Forms will be consumed as PDFs are created."
         )
     
     except HTTPException:
@@ -533,8 +341,10 @@ async def process_batch(
     """
     Start processing batch - Fill all PDFs!
     
-    🔒 Re-validates forms availability at processing time
-    (user may have consumed forms between batch creation and processing)
+    🔒 Re-validates template entitlement at processing time
+    
+    ⚠️  Forms consumption happens ATOMICALLY in Celery workers
+        (1 form per successful PDF, no consumption if PDF fails)
     """
     try:
         services = get_services()
@@ -559,25 +369,11 @@ async def process_batch(
         except EntitlementError as ee:
             raise HTTPException(status_code=402, detail=ee.detail)
 
-        # ✅ CRITICAL: Re-check forms availability at processing time
-        # User may have used forms between batch creation and now
-        pending_items = services["batch"].get_batch_items(batch_id, status="pending")
-        forms_needed = len(pending_items)
+        # ℹ️  No forms check here - consumption happens atomically in worker
+        # If user runs out mid-batch, workers will fail gracefully
+        # Failed PDFs won't consume forms
         
-        try:
-            entitlement_service.ensure_forms_available(
-                user_id=current_user["id"],
-                forms_needed=forms_needed,
-            )
-        except EntitlementError as ee:
-            raise HTTPException(
-                status_code=403,
-                detail=ee.detail,
-                headers={
-                    "X-Forms-Needed": str(forms_needed),
-                    "X-Forms-Available": str(ee.forms_available or 0)
-                }
-            )
+        pending_items = services["batch"].get_batch_items(batch_id, status="pending")
         
         trigger_parallel_batch(
             batch_id=batch_id,
@@ -588,7 +384,7 @@ async def process_batch(
         services['batch'].update_batch_status(batch_id, "processing")
         
         return ProcessBatchResponse(
-            message="Batch processing started",
+            message=f"Batch processing started. Forms will be consumed as each PDF is created ({len(pending_items)} pending).",
             batch_id=batch_id,
             total_items=batch['total_items'],
             status="processing"
@@ -818,6 +614,7 @@ async def retry_failed_items(
     🔒 Requires authentication
     
     Resets failed items to pending and restarts processing.
+    Forms will be consumed for successfully retried PDFs.
     """
     try:
         services = get_services()
@@ -853,7 +650,7 @@ async def retry_failed_items(
         services['batch'].update_batch_status(batch_id, "processing")
 
         return ProcessBatchResponse(
-            message="Retry queued for failed/pending items",
+            message="Retry queued for failed/pending items. Forms will be consumed for successful PDFs.",
             batch_id=batch_id,
             total_items=batch['total_items'],
             status="processing"
@@ -875,6 +672,8 @@ async def delete_batch(
     Delete batch and all its items
     
     🔒 Requires authentication
+    
+    ⚠️  Note: Already consumed forms are NOT refunded
     """
     try:
         services = get_services()
@@ -885,7 +684,7 @@ async def delete_batch(
             raise HTTPException(status_code=404, detail="Batch not found")
         
         return BatchDeletedResponse(
-            message="Batch deleted successfully",
+            message="Batch deleted successfully (consumed forms not refunded)",
             batch_id=batch_id
         )
     
@@ -937,7 +736,7 @@ async def batch_health():
     return {
         "service": "Batch Processing",
         "status": "operational",
-        "version": "2.1-with-entitlements",
+        "version": "3.0-atomic-consumption",
         "features": {
             "csv_upload": True,
             "excel_upload": True,
@@ -946,9 +745,14 @@ async def batch_health():
             "retry_failed": True,
             "batch_size_limit": MAX_BATCH_SIZE,
             "file_size_limit_mb": MAX_FILE_SIZE / 1024 / 1024,
-            "streaming_zip_download": True,
             "template_entitlement_check": True,
-            "forms_availability_check": True
+            "atomic_forms_consumption": True,
+            "consumption_on_success_only": True
+        },
+        "billing": {
+            "forms_consumed_per_pdf": 1,
+            "failed_pdfs_consume_forms": False,
+            "consumption_timing": "after_pdf_creation"
         }
     }
 
@@ -968,8 +772,8 @@ async def single_fill_from_json(
     - Immediately triggers parallel processing for that one item
     - Returns a normal ProcessBatchResponse (status: processing)
 
-    NOTE: Single-fill DOES NOT consume forms_included_in_plan.
-    Only bulk/batch processing consumes forms via /batch/{id}/process.
+    ⚠️  NOTE: Single-fill DOES NOT consume forms_included_in_plan.
+        Only bulk/batch processing consumes forms.
     """
     try:
         services = get_services()
@@ -1016,7 +820,7 @@ async def single_fill_from_json(
         # 6) Options go into batch.options
         options = request.options or {}
 
-        # ❌ NO forms entitlement reservation here
+        # ❌ NO forms entitlement check/consumption here
         # Single-fill is "entitlement only" (template access),
         # not metered against forms_included_in_plan.
 
@@ -1026,7 +830,7 @@ async def single_fill_from_json(
             template_id=request.template_id,
             items=items,
             batch_name=batch_name,
-            options=options,
+            options=options
         )
 
         # 8) Trigger normal parallel batch processing for this ONE item
@@ -1034,13 +838,14 @@ async def single_fill_from_json(
             batch_id=batch_id,
             user_id=current_user["id"],
             template_id=request.template_id,
+            skip_forms_consumption=True
         )
 
         # 9) Immediately mark as processing
         services["batch"].update_batch_status(batch_id, "processing")
 
         return ProcessBatchResponse(
-            message="Single-fill processing started",
+            message="Single-fill processing started (no forms consumed for single fills)",
             batch_id=batch_id,
             total_items=1,
             status="processing",

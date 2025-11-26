@@ -11,7 +11,8 @@ from models.payment_models import (
     TemplateCheckoutRequest,
     LibraryPassCheckoutRequest,
     CheckoutSessionResponse,
-    StripeConfigResponse
+    StripeConfigResponse,
+    TemplatePurchaseResponse
 )
 from services.supabase_client import get_supabase
 from services.auth import get_current_user
@@ -205,6 +206,66 @@ async def get_subscription_status(
         logger.error(f"Error getting subscription status: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to get subscription status: {str(e)}")
 
+@router.get("/template-purchases")
+async def get_user_template_purchases(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get all individual template purchases for the current user.
+    
+    🔒 Requires authentication
+    
+    Returns only active (non-expired) template purchases.
+    """
+    user_id = current_user["id"]
+    logger.info(f"📋 Template purchases request - user: {user_id}")
+    
+    try:
+        # Fetch template purchases with template details
+        response = supabase.table("template_purchases")\
+            .select("*, pdf_templates(name)")\
+            .eq("profile_id", user_id)\
+            .order("purchased_at", desc=True)\
+            .execute()
+        
+        purchases = []
+        now = datetime.now(timezone.utc)
+        
+        for purchase in response.data:
+            # Check if purchase is still active
+            expires_at = None
+            is_active = True
+            
+            if purchase.get("expires_at"):
+                # Use your existing _normalize_timestamp function
+                iso_val, ts_val = _normalize_timestamp(purchase["expires_at"])
+                if iso_val:
+                    expires_at = datetime.fromisoformat(iso_val.replace("Z", "+00:00"))
+                    is_active = expires_at > now
+            
+            # Only return active purchases
+            if is_active:
+                template_name = "Unknown Template"
+                if purchase.get("pdf_templates"):
+                    template_name = purchase["pdf_templates"].get("name", "Unknown Template")
+                
+                purchases.append({
+                    "id": purchase["id"],
+                    "template_id": purchase["template_id"],
+                    "template_name": template_name,
+                    "purchase_type": purchase["purchase_type"],
+                    "amount_paid": purchase["amount_paid"],
+                    "purchased_at": purchase["purchased_at"],
+                    "expires_at": purchase.get("expires_at"),
+                    "is_active": is_active
+                })
+        
+        logger.info(f"✅ Found {len(purchases)} active template purchases for user {user_id}")
+        return purchases
+        
+    except Exception as e:
+        logger.error(f"Error fetching template purchases: {e}", exc_info=True)
+        raise HTTPException(500, f"Failed to fetch template purchases: {str(e)}")
 
 # ============================================================================
 # PUBLIC ENDPOINTS
