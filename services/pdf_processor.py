@@ -34,7 +34,7 @@ def scan_available_fonts():
 
 # Configuration
 GRID_SIZE = 150
-DPI = 300
+DPI = 150
 TEMP_FOLDER = "temp_pdf_uploads"
 GRIDDED_FOLDER = "gridded_pages"
 OUTPUT_FOLDER = "filled_pages"
@@ -752,3 +752,67 @@ class PDFProcessor:
         except Exception as e:
             # Re-raise with descriptive error message
             raise Exception(f"Supabase PDF download failed for {storage_path}: {str(e)}")
+        
+    def pdf_to_images_single_page(
+        self, 
+        pdf_path: str, 
+        session_id: str, 
+        page_num: int
+    ) -> str:
+        """
+        Convert SINGLE page to image (memory efficient).
+        
+        Args:
+            pdf_path: Path to PDF file
+            session_id: Unique session identifier
+            page_num: Page number to convert (1-indexed)
+            
+        Returns:
+            Path to saved image
+        """
+        print(f"Converting page {page_num} to image (session: {session_id})...")
+        
+        try:
+            # Convert ONLY this one page
+            images = convert_from_path(
+                pdf_path, 
+                dpi=self.DPI,
+                first_page=page_num,
+                last_page=page_num
+            )
+            
+            session_folder = f"{self.TEMP_FOLDER}/{session_id}"
+            os.makedirs(session_folder, exist_ok=True)
+            
+            image_path = f"{session_folder}/page_{page_num}.png"
+            images[0].save(image_path, 'PNG')
+            
+            print(f"✅ Converted page {page_num}")
+            return image_path
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert page {page_num}: {e}")
+
+
+    def get_pdf_page_count(self, pdf_path: str) -> int:
+        """Get number of pages in PDF without loading all pages into memory"""
+        from pdf2image.pdf2image import pdfinfo_from_path
+        
+        try:
+            info = pdfinfo_from_path(pdf_path)
+            page_count = info.get("Pages", 0)
+            print(f"📊 PDF has {page_count} pages")
+            return page_count
+        except Exception as e:
+            # Fallback: Convert first page only to detect pages
+            # This is slower but guaranteed to work
+            print(f"⚠️  pdfinfo failed ({e}), using fallback method...")
+            try:
+                images = convert_from_path(pdf_path, dpi=72, last_page=1)
+                # Use poppler's page count from conversion
+                from pdf2image import convert_from_path as cfp
+                # Actually, let's just count by converting at very low quality
+                low_res = convert_from_path(pdf_path, dpi=50)  # Fast, low memory
+                return len(low_res)
+            except Exception as e2:
+                raise RuntimeError(f"Failed to get page count: {e2}")

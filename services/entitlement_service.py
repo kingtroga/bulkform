@@ -2,7 +2,7 @@
 
 import time
 from typing import Dict, Any, List, Tuple, Optional
-from datetime import datetime, timezone  # ✅ NEW
+from datetime import datetime, timezone
 
 from services.supabase_client import get_supabase
 from fastapi import HTTPException
@@ -100,7 +100,7 @@ def ensure_template_single_fill_access(user_id: str, template: dict):
     has_pass = False
     exp_raw = profile.get("official_library_pass_expires_at")
     if profile.get("official_library_pass") and exp_raw:
-        exp_ts = _parse_supabase_timestamp(exp_raw)  # ✅ FIXED
+        exp_ts = _parse_supabase_timestamp(exp_raw)
         if exp_ts is not None and exp_ts > int(time.time()):
             has_pass = True
 
@@ -123,7 +123,7 @@ def ensure_template_single_fill_access(user_id: str, template: dict):
 
     exp_raw = purchase.get("expires_at")
     if exp_raw:
-        exp_ts = _parse_supabase_timestamp(exp_raw)  # ✅ FIXED
+        exp_ts = _parse_supabase_timestamp(exp_raw)
         now = int(time.time())
         if exp_ts is not None and (exp_ts == 0 or exp_ts > now):
             return  # PURCHASE VALID
@@ -138,9 +138,26 @@ def ensure_template_single_fill_access(user_id: str, template: dict):
 
 
 class EntitlementError(Exception):
-    def __init__(self, status_code: int, detail: str):
+    """
+    Custom exception for entitlement checks.
+    
+    Attributes:
+        status_code: HTTP status code (402, 403, etc.)
+        detail: Error message
+        forms_available: Number of forms user has available (for 403 errors)
+        forms_needed: Number of forms user tried to use (for 403 errors)
+    """
+    def __init__(
+        self, 
+        status_code: int, 
+        detail: str, 
+        forms_available: int = None, 
+        forms_needed: int = None
+    ):
         self.status_code = status_code
         self.detail = detail
+        self.forms_available = forms_available
+        self.forms_needed = forms_needed
         super().__init__(detail)
 
 
@@ -183,7 +200,6 @@ class EntitlementService:
         if not expires:
             return False
 
-        # ✅ FIXED: parse Supabase timestamptz / unix ts safely
         exp_ts = _parse_supabase_timestamp(expires)
         if exp_ts is None:
             return False
@@ -265,7 +281,7 @@ class EntitlementService:
             purchase = purchase_result.data
             if purchase:
                 expires = purchase.get("expires_at")
-                exp_ts = _parse_supabase_timestamp(expires)  # ✅ FIXED
+                exp_ts = _parse_supabase_timestamp(expires)
                 now = int(time.time())
                 if exp_ts is not None and (exp_ts == 0 or exp_ts > now):
                     return {
@@ -312,11 +328,15 @@ class EntitlementService:
     ) -> Dict[str, Any]:
         """
         Ensures the user has enough forms to process N items.
-        This is a *reservation* at the point of starting a batch.
-
-        NOTE:
-        - Simple version: deduct up-front from `forms_included_in_plan`.
-        - You can later refine to log each usage in a separate `usage_records` table.
+        This checks availability WITHOUT decrementing - actual usage tracking
+        happens when PDFs are completed.
+        
+        Raises:
+            EntitlementError: If user doesn't have enough forms
+                - status_code: 403
+                - detail: Human-readable message
+                - forms_available: How many forms user has
+                - forms_needed: How many forms requested
         """
         if forms_needed <= 0:
             return {"ok": True, "remaining": None}
@@ -325,21 +345,30 @@ class EntitlementService:
         included = profile.get("forms_included_in_plan", 0) or 0
         used = profile.get("forms_used_this_month", 0) or 0
 
-        remaining = included - used
-        if remaining < forms_needed:
+        forms_available = included - used
+        
+        if forms_available < forms_needed:
+            # Calculate shortfall for helpful error message
+            shortfall = forms_needed - forms_available
+            
             raise EntitlementError(
-                402,  # Payment Required
-                f"Not enough forms. Needed {forms_needed}, but you only have {remaining} available."
+                status_code=403,
+                detail=(
+                    f"Insufficient forms! You need {forms_needed} forms but only have {forms_available} available. "
+                    f"Upgrade your plan or purchase {shortfall} additional forms at $0.35 each."
+                ),
+                forms_available=forms_available,
+                forms_needed=forms_needed
             )
 
-        new_used = used + forms_needed
-
-        # Optimistic update
-        self.supabase.table("profiles").update(
-            {"forms_used_this_month": new_used}
-        ).eq("id", user_id).execute()
-
-        return {"ok": True, "remaining": included - new_used}
+        # Don't actually decrement here - that happens when PDFs complete
+        # This is just a reservation check
+        return {
+            "ok": True, 
+            "forms_available": forms_available,
+            "forms_needed": forms_needed,
+            "remaining": forms_available - forms_needed
+        }
 
 
 _entitlement_service: Optional[EntitlementService] = None

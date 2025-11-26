@@ -92,6 +92,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Forms-Needed",
+        "X-Forms-Available",
+        "X-Requires-Purchase",
+    ],
 )
 
 # Include routers (these work normally without auth)

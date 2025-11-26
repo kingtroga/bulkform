@@ -1,5 +1,5 @@
 """
-Batch Routes - Main API Router
+Batch Routes - With Template Entitlement + Forms Checks for Bulk Processing
 """
 
 from celery_tasks import trigger_parallel_batch, create_batch_zip_task
@@ -293,8 +293,11 @@ async def create_batch_from_csv(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Upload CSV/Excel and create batch job with optional batch-wide defaults
-    (font/size/align + image width/height) stored in batch.options.
+    Upload CSV/Excel and create batch job with optional batch-wide defaults.
+    
+    🔒 Two-layer check:
+    1. Template entitlement (must own template or have Library Pass for paid official templates)
+    2. Forms availability (must have enough forms_included_in_plan for bulk processing)
     """
     try:
         services = get_services()
@@ -315,8 +318,18 @@ async def create_batch_from_csv(
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
 
-        # ✅ enforce template entitlement (Flow 2 uses same rules as Flow 1)
-        ensure_template_single_fill_access(current_user["id"], template)
+        # ✅ STEP 1: Enforce template entitlement (Flow 2: bulk processing)
+        # For paid official templates, user needs either:
+        # - Single template purchase OR Library Pass for BULK usage
+        try:
+            ensure_template_single_fill_access(current_user["id"], template)
+        except EntitlementError as ee:
+            # Return 402 Payment Required with item count hint
+            raise HTTPException(
+                status_code=402,
+                detail=ee.detail,
+                headers={"X-Requires-Purchase": "true"}
+            )
 
         required_fields = list(template['field_mappings'].keys())
 
@@ -342,6 +355,25 @@ async def create_batch_from_csv(
             )
 
         validate_batch_size(result['data'])
+
+        # ✅ STEP 2: Check forms availability BEFORE creating batch
+        # This prevents orphaned batches when user lacks forms
+        forms_needed = len(result['data'])
+        try:
+            entitlement_service.ensure_forms_available(
+                user_id=current_user["id"],
+                forms_needed=forms_needed,
+            )
+        except EntitlementError as ee:
+            # Return 403 Forbidden with shortfall details
+            raise HTTPException(
+                status_code=403,
+                detail=ee.detail,
+                headers={
+                    "X-Forms-Needed": str(forms_needed),
+                    "X-Forms-Available": str(ee.forms_available or 0)
+                }
+            )
 
         options: dict = {}
 
@@ -416,15 +448,9 @@ async def create_batch(
     """
     Create batch from JSON data (no file upload)
     
-    🔒 Requires authentication
-    
-    Use this if you already have the data parsed.
-    For CSV/Excel uploads, use `/batch/create-from-csv` instead.
-    
-    **Limits:**
-    - Maximum 1000 items per batch
-    - template_id must be valid UUID
-    - batch_name: 1-200 characters
+    🔒 Two-layer check:
+    1. Template entitlement
+    2. Forms availability
     """
     try:
         services = get_services()
@@ -435,8 +461,15 @@ async def create_batch(
         if not template:
             raise HTTPException(status_code=404, detail="Template not found")
 
-        # ✅ enforce entitlement for JSON-created batches as well
-        ensure_template_single_fill_access(current_user["id"], template)
+        # ✅ STEP 1: Template entitlement
+        try:
+            ensure_template_single_fill_access(current_user["id"], template)
+        except EntitlementError as ee:
+            raise HTTPException(
+                status_code=402,
+                detail=ee.detail,
+                headers={"X-Requires-Purchase": "true"}
+            )
         
         required_fields = set(template['field_mappings'].keys())
         for idx, item in enumerate(request.items):
@@ -447,6 +480,23 @@ async def create_batch(
                     status_code=400,
                     detail=f"Item {idx} missing required fields: {', '.join(missing)}"
                 )
+        
+        # ✅ STEP 2: Forms availability
+        forms_needed = len(request.items)
+        try:
+            entitlement_service.ensure_forms_available(
+                user_id=current_user["id"],
+                forms_needed=forms_needed,
+            )
+        except EntitlementError as ee:
+            raise HTTPException(
+                status_code=403,
+                detail=ee.detail,
+                headers={
+                    "X-Forms-Needed": str(forms_needed),
+                    "X-Forms-Available": str(ee.forms_available or 0)
+                }
+            )
         
         batch_id = services['batch'].create_batch(
             user_id=current_user['id'],
@@ -483,17 +533,8 @@ async def process_batch(
     """
     Start processing batch - Fill all PDFs!
     
-    🔒 Requires authentication
-    
-    **This is where the magic happens:**
-    - Gets all pending items from batch
-    - For each item:
-      1. Downloads template PDF
-      2. Fills with client data
-      3. Generates final PDF
-      4. Updates progress
-    
-    Processing happens in background. Use `/batch/{id}/progress` to track.
+    🔒 Re-validates forms availability at processing time
+    (user may have consumed forms between batch creation and processing)
     """
     try:
         services = get_services()
@@ -508,23 +549,35 @@ async def process_batch(
                 detail=f"Batch cannot be processed (status: {batch['status']})"
             )
 
-        # ✅ load template and enforce entitlement again at processing time
+        # ✅ Re-validate template entitlement (shouldn't fail, but defensive)
         template = services["template"].get_template(batch["template_id"], current_user["id"])
         if not template:
             raise HTTPException(status_code=404, detail="Template not found for batch")
 
-        ensure_template_single_fill_access(current_user["id"], template)
+        try:
+            ensure_template_single_fill_access(current_user["id"], template)
+        except EntitlementError as ee:
+            raise HTTPException(status_code=402, detail=ee.detail)
 
-        # ✅ forms usage reservation for all pending items in this batch
+        # ✅ CRITICAL: Re-check forms availability at processing time
+        # User may have used forms between batch creation and now
         pending_items = services["batch"].get_batch_items(batch_id, status="pending")
         forms_needed = len(pending_items)
+        
         try:
             entitlement_service.ensure_forms_available(
                 user_id=current_user["id"],
                 forms_needed=forms_needed,
             )
         except EntitlementError as ee:
-            raise HTTPException(status_code=ee.status_code, detail=ee.detail)
+            raise HTTPException(
+                status_code=403,
+                detail=ee.detail,
+                headers={
+                    "X-Forms-Needed": str(forms_needed),
+                    "X-Forms-Available": str(ee.forms_available or 0)
+                }
+            )
         
         trigger_parallel_batch(
             batch_id=batch_id,
@@ -884,7 +937,7 @@ async def batch_health():
     return {
         "service": "Batch Processing",
         "status": "operational",
-        "version": "2.0-refactored",
+        "version": "2.1-with-entitlements",
         "features": {
             "csv_upload": True,
             "excel_upload": True,
@@ -893,7 +946,9 @@ async def batch_health():
             "retry_failed": True,
             "batch_size_limit": MAX_BATCH_SIZE,
             "file_size_limit_mb": MAX_FILE_SIZE / 1024 / 1024,
-            "streaming_zip_download": True
+            "streaming_zip_download": True,
+            "template_entitlement_check": True,
+            "forms_availability_check": True
         }
     }
 
@@ -932,7 +987,10 @@ async def single_fill_from_json(
             raise HTTPException(status_code=404, detail="Template not found")
 
         # 3) Enforce Flow 1 access rules (custom owner, free official, paid official)
-        ensure_template_single_fill_access(current_user["id"], template)
+        try:
+            ensure_template_single_fill_access(current_user["id"], template)
+        except EntitlementError as ee:
+            raise HTTPException(status_code=402, detail=ee.detail)
 
         # 4) Validate required fields vs data
         required_fields = set(template["field_mappings"].keys())

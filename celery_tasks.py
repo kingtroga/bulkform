@@ -20,8 +20,23 @@ import tempfile
 from utils.storage_utils import download_with_retries
 import httpx
 import zipfile
+import gc
 
 ZIP_TTL_SECONDS = 5 * 60 * 60  # 5 hours
+
+# ============================================================================
+# MEMORY MANAGEMENT
+# ============================================================================
+
+def force_memory_cleanup():
+    """Aggressively clear memory after processing"""
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except:
+        pass
 
 # ============================================================================
 # CLEANUP UTILITIES
@@ -49,6 +64,8 @@ def cleanup_temp_files(temp_pdf_path: str, temp_image_paths: list, session_id: s
         print(f"🧽 Session folder cleanup done for: {session_id}")
     except Exception as e:
         print(f"⚠️  Session cleanup failed for {session_id}: {e}")
+    
+    force_memory_cleanup()
 
 def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
     if not only_param:
@@ -68,109 +85,6 @@ def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
             except ValueError:
                 raise ValueError(f"Invalid item index: {part}")
     return indices
-
-
-def create_streaming_zip_sync(
-    batch_id: str,
-    user_id: str,
-    only_indices: Optional[Set[int]] = None,
-) -> tuple:
-    """
-    Create ZIP file synchronously (for Celery task).
-    Returns (zip_storage_path, signed_url) for immediate download.
-    """
-    batch_service = get_batch_service()
-    pdf_processor = PDFProcessor()
-    
-    batch = batch_service.get_batch(batch_id, user_id)
-    if not batch:
-        raise Exception(f"Batch not found: {batch_id}")
-    
-    completed = batch_service.get_batch_items(batch_id, status="completed")
-    if not completed:
-        raise Exception(f"No completed items in batch {batch_id}")
-    
-    if only_indices:
-        completed = [
-            item for item in completed 
-            if item.get("item_index") in only_indices
-        ]
-    
-    print(f"\n📦 [create_streaming_zip_sync] Starting for batch {batch_id}")
-    print(f"📦 Total items: {len(completed)}")
-    
-    # Create temp zip file
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
-        zip_path = tmp_zip.name
-    
-    try:
-        import zipfile as zf_module
-        files_added = 0
-        
-        with zf_module.ZipFile(zip_path, 'w', zf_module.ZIP_DEFLATED) as zipf:
-            for item in completed:
-                storage_path = item.get("storage_path")
-                item_index = item.get("item_index", 0)
-                
-                if not storage_path:
-                    print(f"   ⚠️ Item {item_index}: No storage_path, skipping")
-                    continue
-                
-                filename = f"form_{item_index}.pdf"
-                
-                try:
-                    # Download from Supabase storage
-                    pdf_bytes = pdf_processor.supabase.storage.from_(
-                        pdf_processor.STORAGE_BUCKET
-                    ).download(storage_path)
-                    
-                    # Add to ZIP
-                    zipf.writestr(filename, pdf_bytes)
-                    files_added += 1
-                    
-                    if files_added % 10 == 0:
-                        print(f"   ✅ Added {files_added} files...")
-                    
-                except Exception as e:
-                    print(f"   ⚠️ Item {item_index}: Failed - {str(e)}")
-                    continue
-        
-        print(f"✅ ZIP created locally: {files_added} files")
-        
-        # Upload to storage
-        zip_size = os.path.getsize(zip_path)
-        print(f"📤 Uploading {zip_size} bytes to Supabase...")
-        
-        zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
-        cleanup_zip_task.apply_async(args=[user_id, batch_id, zip_storage_path], countdown=ZIP_TTL_SECONDS)
-        
-        with open(zip_path, 'rb') as f:
-            pdf_processor.supabase.storage.from_(
-                pdf_processor.STORAGE_BUCKET
-            ).upload(
-                path=zip_storage_path,
-                file=f.read(),
-                file_options={"content-type": "application/zip", "upsert": "true"}
-            )
-        
-        # Generate signed URL
-        signed_url_response = pdf_processor.supabase.storage.from_(
-            pdf_processor.STORAGE_BUCKET
-        ).create_signed_url(zip_storage_path, 3600)
-        
-        signed_url = signed_url_response['signedURL']
-        
-        print(f"✅ ZIP uploaded and ready for download")
-        print(f"✅ URL: {signed_url[:80]}...")
-        
-        return (zip_storage_path, signed_url)
-    
-    finally:
-        # Cleanup temp file
-        if os.path.exists(zip_path):
-            os.unlink(zip_path)
-            print(f"🧹 Temp ZIP cleaned up")
 
 # ============================================================================
 # FIELD DATA BUILDER
@@ -208,7 +122,6 @@ def resolve_text_style(field_name: str, client_data: Dict, field_config: Dict, b
 
     align = (pf_align or row_align or b_align or t_align or "center")
     align = str(align).lower()
-    # tolerate old values; normalize to allowed set
     if align not in ("top", "center", "bottom"):
         align = "left"
     return font, size, align
@@ -229,7 +142,6 @@ def resolve_image_dims(field_name: str, client_data: Dict, field_config: Dict, b
                 return client_data[k]
         return None
 
-    # tolerate common header variants from CSV
     pf_w = pick(f"{field_name}_width", f"{field_name}__width", f"{field_name}_w")
     pf_h = pick(f"{field_name}_height", f"{field_name}__height", f"{field_name}_h")
 
@@ -245,7 +157,6 @@ def resolve_image_dims(field_name: str, client_data: Dict, field_config: Dict, b
 
     def to_int(v, fallback):
         try:
-            # handle " 300 ", "300.0", etc.
             return int(float(str(v).strip()))
         except Exception:
             return fallback
@@ -255,8 +166,6 @@ def resolve_image_dims(field_name: str, client_data: Dict, field_config: Dict, b
 
     print(f"     - resolve_image_dims[{field_name}] -> width={width}, height={height}")
     return width, height
-
-
 
 
 def build_field_data(field_mappings: Dict, client_data: Dict, image_service, user_id: str, temp_image_paths: list, batch_options: Dict = None):
@@ -274,7 +183,6 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
         field_type = field_config.get('type', 'text')
         print(f"   • Field '{field_name}' → page={page} type={field_type}")
 
-        # Handle IMAGE/signature/stamp fields
         if field_type in ['image', 'signature', 'stamp']:
             image_ref = client_data.get(field_name, '')
             print(f"     - image_ref: {repr(image_ref)[:120]}")
@@ -302,17 +210,14 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
                 print(f"     - No image provided in client_data for '{field_name}'")
             continue
 
-        # Handle TEXT / CHECKBOX fields
         if page not in pages_data:
             pages_data[page] = []
 
         value = client_data.get(field_name, '')
 
-        # Checkbox handling
         if field_type == 'checkbox':
             value = handle_checkbox(value, field_config)
 
-        # Font & size resolution
         font_value, size_value, align_value = resolve_text_style(
             field_name, client_data, field_config, batch_options
             )
@@ -405,41 +310,22 @@ def fill_single_pdf_sync(
     item_index: int,
     batch_options: Dict = None
 ) -> Dict[str, str]:
-    """Fill a single PDF with text AND images — with verbose logs"""
+    """Fill a single PDF with PAGE-BY-PAGE processing (memory efficient)"""
     print("\n" + "=" * 80)
-    print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index} user_id={user_id}")
+    print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index}")
     batch_options = batch_options or {}
     
     pdf_processor = PDFProcessor()
     image_service = get_image_service()
     session_id = f"{batch_id}_{item_index}"
     temp_pdf_path = None
-    temp_image_paths = []  # Track temp images for cleanup
-
-    # Log template summary
-    try:
-        fm = template.get("field_mappings", {})
-        print(f"🧾 Template summary:"
-              f"\n  - id: {template.get('id')}"
-              f"\n  - name: {template.get('name')}"
-              f"\n  - is_official: {template.get('is_official')}"
-              f"\n  - pdf_url (storage path): {template.get('pdf_url')}"
-              f"\n  - field_mappings keys: {list(fm.keys())[:10]} (total={len(fm)})")
-    except Exception as e:
-        print(f"⚠️  Failed to log template summary: {e}")
-
-    # Log client data keys
-    try:
-        print(f"👤 Client data keys (first 20): {list(client_data.keys())[:20]}")
-    except Exception as e:
-        print(f"⚠️  Failed to log client data keys: {e}")
+    temp_image_paths = []
 
     try:
         # Step 1: Download template PDF
         raw_path = template.get('pdf_url', '')
         bucket = pdf_processor.STORAGE_BUCKET
-        print(f"📦 Storage bucket: {bucket}")
-        print(f"📥 Attempting to download template PDF:\n    - path: {raw_path}")
+        print(f"📥 Downloading template PDF: {raw_path}")
 
         try:
             pdf_bytes = download_with_retries(
@@ -450,33 +336,22 @@ def fill_single_pdf_sync(
                 base_delay=0.25,
                 template_hint=template.get("name")
             )
-            print(f"✅ Downloaded template bytes: {len(pdf_bytes)}")
+            print(f"✅ Downloaded: {len(pdf_bytes)} bytes")
         except Exception as dl_err:
-            print(f"❌ Download failed from primary bucket '{pdf_processor.STORAGE_BUCKET}': {dl_err}")
-            fb = getattr(pdf_processor, "FALLBACK_STORAGE_BUCKET", None)
-            if fb:
-                print(f"🔁 Trying fallback bucket: {fb}")
-                try:
-                    pdf_bytes = pdf_processor.supabase.storage.from_(fb).download(raw_path)
-                    print(f"✅ Downloaded from fallback bucket '{fb}': {len(pdf_bytes)} bytes")
-                except Exception as fb_err:
-                    print(f"❌ Fallback download also failed: {fb_err}")
-                    raise
-            else:
-                raise
+            print(f"❌ Download failed: {dl_err}")
+            raise
 
         # Step 2: Save to temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', mode='wb') as tmp:
             tmp.write(pdf_bytes)
             temp_pdf_path = tmp.name
-        print(f"📄 Temp PDF path: {temp_pdf_path}")
+        print(f"📄 Temp PDF: {temp_pdf_path}")
 
-        # Step 3: Convert PDF to images
-        print(f"🖼️ Converting PDF to images for session: {session_id}")
-        num_pages = pdf_processor.pdf_to_images(temp_pdf_path, session_id)
-        print(f"🖨️  Conversion done. Pages: {num_pages}")
+        # Step 3: Get page count (WITHOUT loading all pages)
+        num_pages = pdf_processor.get_pdf_page_count(temp_pdf_path)
+        print(f"📊 Total pages: {num_pages}")
 
-        # Step 4: Build field data (text and images)
+        # Step 4: Build field data (organize by page)
         pages_data, images_data, text_count, image_count = build_field_data(
             template['field_mappings'],
             client_data,
@@ -486,62 +361,58 @@ def fill_single_pdf_sync(
             batch_options=batch_options
         )
 
-        # Step 5: Fill text fields
-        total_text_items = sum(len(t) for t in pages_data.values())
-        print(f"✍️  Writing text fields: pages={sorted(pages_data.keys())}, "
-              f"total_text_items={total_text_items}, counted={text_count}")
-        for page_num, text_data in pages_data.items():
-            if text_data:
-                print(f"   → Page {page_num}: {len(text_data)} item(s)")
-                pdf_processor.write_text_on_page(session_id, page_num, text_data)
+        print(f"📋 Field data built: {text_count} text fields, {image_count} images")
 
-        # Step 6: Fill image fields
-        if images_data:
-            total_images = sum(len(imgs) for imgs in images_data.values())
-            print(f"🖼️  Placing images: pages={sorted(images_data.keys())}, "
-                  f"total_images={total_images}, counted={image_count}")
-            for page_num, image_list in images_data.items():
-                if image_list:
-                    print(f"   → Page {page_num}: {len(image_list)} image(s)")
-                    pdf_processor.add_images_to_page(session_id, page_num, image_list)
-        else:
-            print("🖼️  No images to place")
+        # Step 5: Process each page individually (MEMORY EFFICIENT!)
+        for page_num in range(1, num_pages + 1):
+            print(f"\n🔄 Processing page {page_num}/{num_pages}...")
+            
+            # 5a. Convert ONLY this page to image
+            pdf_processor.pdf_to_images_single_page(temp_pdf_path, session_id, page_num)
+            
+            # 5b. Write text on this page (if any)
+            if page_num in pages_data and pages_data[page_num]:
+                print(f"   ✍️  Writing {len(pages_data[page_num])} text items")
+                pdf_processor.write_text_on_page(session_id, page_num, pages_data[page_num])
+            
+            # 5c. Add images to this page (if any)
+            if page_num in images_data and images_data[page_num]:
+                print(f"   🖼️  Placing {len(images_data[page_num])} images")
+                pdf_processor.add_images_to_page(session_id, page_num, images_data[page_num])
+            
+            # 5d. Force cleanup after each page
+            force_memory_cleanup()
+            print(f"   ✅ Page {page_num} complete")
 
-        # Step 7: Generate final PDF
+        # Step 6: Generate final PDF
         out_name = f"batch_{batch_id}_item_{item_index}.pdf"
-        print(f"🧪 Creating final PDF (upload) → {out_name}")
+        print(f"\n🧪 Creating final PDF: {out_name}")
         result = pdf_processor.create_pdf_with_upload(
             session_id=session_id,
             user_id=user_id,
             num_pages=num_pages,
             output_name=out_name
         )
-        storage_url = result['storage_url']
-        final_storage_path = result['storage_path']
 
-        print(f"✅ PDF generated & uploaded")
-        print(f"   - signed URL: {storage_url[:100]}{'...' if len(storage_url) > 100 else ''}")
-        print(f"   - storage_path: {final_storage_path}")
+        print(f"✅ PDF uploaded: {result['storage_path']}")
 
-        # Step 8: Cleanup
+        # Step 7: Cleanup
         cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
 
-        print(f"🧩 fill_single_pdf_sync: END | batch_id={batch_id} item_index={item_index} ✅")
+        print(f"🧩 fill_single_pdf_sync: END ✅")
         print("=" * 80 + "\n")
 
         return {
-            'storage_url': storage_url,
-            'storage_path': final_storage_path
+            'storage_url': result['storage_url'],
+            'storage_path': result['storage_path']
         }
 
     except Exception as e:
-        print(f"⛔ ERROR in fill_single_pdf_sync | batch_id={batch_id} item_index={item_index}: {e}")
+        print(f"⛔ ERROR: {e}")
         cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
-        print(f"🧩 fill_single_pdf_sync: END (ERROR) | batch_id={batch_id} item_index={item_index} ❌")
         print("=" * 80 + "\n")
         raise Exception(f"PDF generation failed: {str(e)}")
-
-
+    
 # ============================================================================
 # FILENAME HELPERS
 # ============================================================================
@@ -551,22 +422,15 @@ def clean_filename(text: str) -> str:
     if not text:
         return ""
 
-    # Remove or replace special characters
     cleaned = ''.join(c if c.isalnum() or c in ' -_' else '_' for c in str(text))
-
-    # Replace spaces with underscores
     cleaned = cleaned.replace(' ', '_')
-
-    # Collapse multiple underscores into one
     cleaned = '_'.join(filter(None, cleaned.split('_')))
 
-    # Trim excessively long names
     return cleaned[:50] if cleaned else ""
 
 
 def generate_pdf_filename(client_data: Dict, item_index: int) -> str:
     """Generate friendly filename from client data"""
-    # Try different name combinations
     if 'last_name' in client_data and 'first_name' in client_data:
         last = clean_filename(str(client_data['last_name']))
         first = clean_filename(str(client_data['first_name']))
@@ -583,7 +447,6 @@ def generate_pdf_filename(client_data: Dict, item_index: int) -> str:
         if name:
             return f"{name}.pdf"
     
-    # Fallback to index-based name
     return f"document_{item_index + 1}.pdf"
 
 # ============================================================================
@@ -596,10 +459,9 @@ async def create_batch_zip(
     pdf_items: List[Dict],
     user_id: str
 ) -> str:
-    """Create zip file with all PDFs - FIXED VERSION"""  
+    """Create zip file with all PDFs"""  
     pdf_processor = PDFProcessor()
     
-    # Create temp zip file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
         zip_path = tmp_zip.name
     
@@ -607,7 +469,6 @@ async def create_batch_zip(
     print(f"📦 Total PDFs to add: {len(pdf_items)}")
     
     try:
-        # Create zip and add PDFs
         async with httpx.AsyncClient(timeout=30.0) as client:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 
@@ -620,13 +481,11 @@ async def create_batch_zip(
                         continue
                     
                     try:
-                        # Generate filename
                         client_data = item.get('client_data', {})
                         filename = generate_pdf_filename(client_data, item['item_index'])
                         
                         pdf_bytes = b""
 
-                        # Prefer storage_path (avoids expired signed URLs)
                         if storage_path:
                             print(f"  📥 [{idx}/{len(pdf_items)}] Downloading via storage_path: {filename}")
                             print(f"      PATH: {storage_path}")
@@ -634,7 +493,6 @@ async def create_batch_zip(
                                 pdf_processor.STORAGE_BUCKET
                             ).download(storage_path)
 
-                        # If no storage_path bytes (or not provided), try signed URL
                         if (not pdf_bytes) and pdf_url:
                             try:
                                 print(f"  📥 [{idx}/{len(pdf_items)}] Downloading via URL: {filename}")
@@ -643,7 +501,6 @@ async def create_batch_zip(
                                 response.raise_for_status()
                                 pdf_bytes = response.content
                             except httpx.HTTPStatusError as http_err:
-                                # Fallback: signed URL likely expired
                                 print(f"  ⚠️  [{idx}/{len(pdf_items)}] URL fetch failed ({http_err.response.status_code}). Trying storage fallback...")
                                 if storage_path:
                                     pdf_bytes = pdf_processor.supabase.storage.from_(
@@ -658,7 +515,6 @@ async def create_batch_zip(
                         
                         print(f"  ✅ [{idx}/{len(pdf_items)}] Downloaded {len(pdf_bytes)} bytes")
                         
-                        # Add to zip
                         zipf.writestr(filename, pdf_bytes)
                         print(f"  ✅ [{idx}/{len(pdf_items)}] Added to zip: {filename}")
                         
@@ -666,21 +522,18 @@ async def create_batch_zip(
                         print(f"  ❌ [{idx}/{len(pdf_items)}] Failed: {str(e)}")
                         continue
         
-        # Verify zip has content
         zip_size = os.path.getsize(zip_path)
         print(f"📦 Zip file size: {zip_size} bytes")
         
-        if zip_size < 100:  # Zip with no files is ~22 bytes
+        if zip_size < 100:
             raise Exception("Zip file is empty! No PDFs were added.")
         
-        # Verify zip contents
         with zipfile.ZipFile(zip_path, 'r') as zipf:
             file_count = len(zipf.namelist())
             print(f"📦 Zip contains {file_count} file(s)")
             if file_count == 0:
                 raise Exception("Zip created but contains no files!")
         
-        # Upload zip to storage
         print(f"📤 Uploading zip to storage...")
         zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
         
@@ -696,7 +549,6 @@ async def create_batch_zip(
                 file_options={"content-type": "application/zip", "upsert": "true"}
             )
         
-        # Generate signed URL
         signed_url_response = pdf_processor.supabase.storage.from_(
             pdf_processor.STORAGE_BUCKET
         ).create_signed_url(zip_storage_path, 3600)
@@ -711,6 +563,8 @@ async def create_batch_zip(
         print(f"✅ Zip created successfully!")
         print(f"✅ URL: {zip_url[:80]}...")
         
+        force_memory_cleanup()
+        
         return zip_url
     
     except Exception as e:
@@ -718,7 +572,6 @@ async def create_batch_zip(
         raise
     
     finally:
-        # Cleanup temp file
         if os.path.exists(zip_path):
             print(f"🧹 Cleaning up temp file: {zip_path}")
             os.unlink(zip_path)
@@ -727,32 +580,24 @@ async def create_batch_zip(
 @celery_app.task(
     name='celery_tasks.cleanup_zip',
     bind=True,
-    max_retries=3,               # retry if transient error
-    default_retry_delay=60       # 1 min between retries
+    max_retries=3,
+    default_retry_delay=60
 )
 def cleanup_zip_task(self, user_id: str, batch_id: str, zip_storage_path: str):
-    """
-    Deletes the generated ZIP from Supabase after TTL and clears download_url.
-    Idempotent: safe to run multiple times.
-    """
+    """Delete ZIP from Supabase after TTL and clear download_url"""
     try:
         print(f"\n🧹 Cleanup ZIP for batch={batch_id}")
         pdf_processor = PDFProcessor()
         supa = pdf_processor.supabase
         bucket = pdf_processor.STORAGE_BUCKET
 
-        # 1) Delete the zip from storage (idempotent remove)
         try:
-            # Supabase-py uses remove([...]) for storage deletes
             supa.storage.from_(bucket).remove([zip_storage_path])
             print(f"✅ Removed from storage: {bucket}/{zip_storage_path}")
         except Exception as e:
-            # If already removed, log and continue
             print(f"⚠️  Storage remove warning ({zip_storage_path}): {e}")
 
-        # 2) Clear the download_url on the batch job
         batch_service = get_batch_service()
-        # update_batch_status only sets provided keys; to clear, do a direct update:
         try:
             batch_service.supabase.table(batch_service.batch_table).update({
                 "download_url": None
@@ -762,12 +607,11 @@ def cleanup_zip_task(self, user_id: str, batch_id: str, zip_storage_path: str):
             print(f"⚠️  Failed to clear download_url for {batch_id}: {e}")
 
         print(f"🧹 Cleanup complete for batch={batch_id}")
+        force_memory_cleanup()
 
     except Exception as e:
         print(f"❌ cleanup_zip_task error: {e}")
         raise self.retry(exc=e)
-
-
 
 
 @celery_app.task(name='celery_tasks.process_single_pdf', bind=True)
@@ -780,24 +624,7 @@ def process_single_pdf_task(
     template_id: str,
     user_id: str
 ):
-    """
-    Process a SINGLE PDF in parallel
-    
-    This runs independently on different workers
-    100 items = 100 parallel tasks across your workers
-    
-    Args:
-        self: Celery task instance (for retries)
-        batch_id: Batch UUID
-        item_id: Item UUID
-        item_index: Item number (0-99 for 100 items)
-        client_data: Client form data
-        template_id: Template UUID
-        user_id: User UUID
-        
-    Returns:
-        Dict with storage_url and storage_path
-    """
+    """Process a SINGLE PDF in parallel"""
     task_start = time.time()
     print(f"\n🚀 [Worker {self.request.id[:8]}] Processing item {item_index}")
     
@@ -809,12 +636,10 @@ def process_single_pdf_task(
         batch_options = (batch.get("options") or {})
         batch_service.update_batch_item(item_id, "processing")
         
-        # Get template
         template = template_service.get_template(template_id, user_id)
         if not template:
             raise Exception(f"Template not found: {template_id}")
         
-        # Fill PDF (this is the heavy work)
         pdf_start = time.time()
         result = fill_single_pdf_sync(
             template=template,
@@ -826,7 +651,6 @@ def process_single_pdf_task(
         )
         pdf_time = time.time() - pdf_start
         
-        # Mark as completed
         batch_service.update_batch_item(
             item_id,
             "completed",
@@ -834,11 +658,10 @@ def process_single_pdf_task(
             storage_path=result['storage_path']
         )
         
-        # Increment counters
-        #batch_service.increment_batch_counters(batch_id, completed=1)
-        
         task_time = time.time() - task_start
         print(f"✅ [Worker {self.request.id[:8]}] Item {item_index} done in {task_time:.1f}s (PDF: {pdf_time:.1f}s)")
+        
+        force_memory_cleanup()
         
         return {
             'item_id': item_id,
@@ -852,32 +675,25 @@ def process_single_pdf_task(
         error_msg = str(e)
         print(f"❌ [Worker {self.request.id[:8]}] Item {item_index} failed: {error_msg}")
         
-        # Mark as failed
         batch_service = get_batch_service()
         batch_service.update_batch_item(
             item_id,
             "failed",
             error_message=error_msg
         )
-        #batch_service.increment_batch_counters(batch_id, failed=1)
         
-        # Retry logic (Celery auto-retries)
+        force_memory_cleanup()
+        
         raise self.retry(exc=e, countdown=5, max_retries=2)
 
 
 @celery_app.task(name='celery_tasks.finalize_batch')
 def finalize_batch_task(batch_id: str, user_id: str):
-    """
-    Finalize batch after all items processed
-    
-    Called by a Celery chord/chain after all PDFs done
-    Checks final status and marks batch complete
-    """
+    """Finalize batch after all items processed"""
     print(f"\n🏁 Finalizing batch: {batch_id}")
     
     try:
         batch_service = get_batch_service()
-        # Recompute fresh stats from DB (DO NOT trust incremented counters)
         stats = batch_service.get_batch_progress(batch_id, user_id)
         total      = stats.get('total', 0)
         completed  = stats.get('completed', 0)
@@ -893,42 +709,37 @@ def finalize_batch_task(batch_id: str, user_id: str):
             batch_service.update_batch_status(batch_id, new_status)
             print(f"✅ Batch {batch_id} marked {new_status}")
         else:
-            # Still work left somewhere—do NOT mark complete
             batch_service.update_batch_status(batch_id, "processing")
             print(f"⏳ Batch {batch_id} still in progress; leaving status as processing")
+        
+        force_memory_cleanup()
+        
     except Exception as e:
         print(f"❌ Failed to finalize batch: {str(e)}")
 
 
 @celery_app.task(
     name='celery_tasks.create_batch_zip_task',
-    soft_time_limit=1800,   # 30 min
-    time_limit=2000         # hard kill a bit after soft
+    soft_time_limit=1800,
+    time_limit=2000
 )
 def create_batch_zip_task(
     batch_id: str,
     batch_name: str,
     user_id: str
 ):
-    """
-    Create zip file asynchronously
-    
-    This is also slow, so we offload it to Celery
-    User gets instant response, zip created in background
-    """
+    """Create zip file asynchronously"""
     print(f"\n📦 Creating zip for batch: {batch_id}")
     
     try:
         batch_service = get_batch_service()
         
-        # Get completed items
         completed_items = batch_service.get_batch_items(batch_id, status="completed")
         
         if not completed_items:
             print(f"⚠️  No completed items to zip")
             return None
         
-        # Build pdf_items list
         pdf_items = [
             {
                 "item_index": item["item_index"],
@@ -939,7 +750,6 @@ def create_batch_zip_task(
             for item in completed_items
         ]
         
-        # Create zip (async function, so we need event loop)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -954,40 +764,16 @@ def create_batch_zip_task(
         
         loop.close()
         
-        # Update batch with zip URL
         batch_service.update_batch_status(batch_id, "completed", download_url=zip_url)
         
         print(f"✅ Zip created: {zip_url[:80]}...")
+        
+        force_memory_cleanup()
+        
         return zip_url
     
     except Exception as e:
         print(f"❌ Zip creation failed: {str(e)}")
-        raise
-
-@celery_app.task(
-    name='celery_tasks.create_zip_task',
-    soft_time_limit=1800,   # 30 min
-    time_limit=2000,        # hard kill after soft
-    queue='zip_creation'
-)
-def create_zip_task(batch_id: str, user_id: str, only_indices: list = None):
-    """
-    Create ZIP file in background Celery worker (non-blocking).
-    
-    The API returns immediately after queueing this task.
-    ZIP is created in parallel by a dedicated worker.
-    User can stream it instantly once ready.
-    """
-    print(f"\n📦 [Celery Worker] Creating ZIP for batch: {batch_id}")
-    
-    try:
-        only_set = set(only_indices) if only_indices else None
-        result = create_streaming_zip_sync(batch_id, user_id, only_set)
-        print(f"✅ ZIP task complete: {batch_id}")
-        return result
-    
-    except Exception as e:
-        print(f"❌ ZIP task failed: {str(e)}")
         raise
 
 
@@ -996,26 +782,12 @@ def create_zip_task(batch_id: str, user_id: str, only_indices: list = None):
 # ============================================================================
 
 def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
-    """
-    Trigger parallel processing of entire batch
-    
-    Instead of processing items sequentially, this sends ALL items
-    to Celery queue immediately. Workers process them in parallel.
-    
-    100 items → 100 Celery tasks → Processed by 10 workers in parallel
-    = ~10x faster (or more with more workers!)
-    
-    Args:
-        batch_id: Batch UUID
-        user_id: User UUID
-        template_id: Template UUID
-    """
+    """Trigger parallel processing of entire batch"""
     print(f"\n⚡ PARALLEL PROCESSING START: {batch_id}")
     start_time = time.time()
     
     batch_service = get_batch_service()
     
-    # Get ALL pending items
     items = batch_service.get_batch_items(batch_id, status="pending")
     
     if not items:
@@ -1024,13 +796,10 @@ def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
     
     print(f"📊 Queuing {len(items)} tasks for parallel processing...")
     
-    # Update batch status
     batch_service.update_batch_status(batch_id, "processing")
     
-    # Create task group (all tasks run in parallel!)
     from celery import group, chord
     
-    # Build parallel task group
     task_group = group(
         process_single_pdf_task.s(
             batch_id=batch_id,
@@ -1043,7 +812,6 @@ def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str):
         for item in items
     )
     
-    # Execute with callback when all done
     callback = finalize_batch_task.si(batch_id, user_id)
     job = chord(task_group)(callback)
     
