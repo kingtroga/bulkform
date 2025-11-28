@@ -106,8 +106,30 @@ async def signup(credentials: SignUpRequest):
         
         print("✅ Captcha verified, proceeding with signup")
         supabase = get_supabase()
+
+        try:
+            rpc_resp = supabase.rpc(
+                "get_user_id_by_email",
+                {"p_email": credentials.email}
+            ).execute()
+
+            existing_id = rpc_resp.data  # UUID or None
+            print(f"Email pre-check existing_id={existing_id}")
+
+            if existing_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "An account with this email already exists. "
+                        "If this is you, please sign in instead."
+                    )
+                )
+        except HTTPException:
+            raise
+        except Exception as check_err:
+            print(f"⚠️ Email pre-check failed (continuing anyway): {check_err}")
+
         print("Starting Supabase signup...")
-        
         response = supabase.auth.sign_up({
             "email": credentials.email,
             "password": credentials.password
@@ -121,8 +143,21 @@ async def signup(credentials: SignUpRequest):
             )
         
         try:
-            profile = supabase.table("profiles").select("*").eq("id", response.user.id).single().execute()
-            user_data = profile.data
+            profile = (
+                supabase
+                    .table("profiles")
+                    .select("*")
+                    .eq("id", response.user.id)
+                    .limit(1)
+                    .execute()
+            )
+            if profile.data:
+                user_data = profile.data[0]
+            else:
+                user_data = {
+                    "id": response.user.id,
+                    "email": response.user.email,
+                }
         except Exception as profile_error:
             print(f"Profile fetch failed: {profile_error}")
             user_data = {
@@ -151,17 +186,10 @@ async def signup(credentials: SignUpRequest):
         import traceback
         print(traceback.format_exc())
         
-        error_msg = str(e)
-        if "already registered" in error_msg.lower():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="An account with this email already exists"
-            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Something went wrong while creating your account"
         )
-
 
 @router.post("/signin", response_model=AuthResponse)
 @limiter.limit("5/minute")  # Rate limit: 5 attempts per minute per IP
