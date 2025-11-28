@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 class SignUpRequest(BaseModel):
     """Request model for user signup"""
@@ -16,6 +16,7 @@ class SignInRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     """Request model for password reset"""
     email: EmailStr
+    options: Optional[Dict[str, Any]] = None
 
 class UpdatePasswordRequest(BaseModel):
     """Request model for password update"""

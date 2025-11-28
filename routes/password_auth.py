@@ -18,20 +18,32 @@ async def request_password_reset(request: ResetPasswordRequest):
     """Request password reset email"""
     try:
         supabase = get_supabase()
-        
+
+        # Extract captcha token if provided
+        captcha_token = None
+        if request.options:
+            captcha_token = request.options.get("captchaToken")
+
+        options = {
+            "redirect_to": f"{FRONTEND_URL}/reset-password-confirm/"
+        }
+        if captcha_token:
+            options["captchaToken"] = captcha_token
+
         supabase.auth.reset_password_for_email(
             request.email,
-            options={
-                "redirect_to": f"{FRONTEND_URL}/reset-password-confirm/"
-            }
+            options=options
         )
+
     except Exception as e:
+        # Supabase will throw here if captcha is missing/invalid, email not allowed, etc.
         print(f"Password reset error: {e}")
-        pass
-    
+        # We still return generic message to avoid leaking which emails exist
+
     return MessageResponse(
         message="If an account exists with that email, you will receive a password reset link shortly"
     )
+
 
 
 @router.post("/update-password", response_model=MessageResponse)
