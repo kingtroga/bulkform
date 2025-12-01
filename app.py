@@ -84,7 +84,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict in production
+    allow_origins=[
+        "http://www.bulkform.app",
+        "https://www.bulkform.app",
+        "http://bulkform.app",
+        "https://bulkform.app",
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,6 +101,7 @@ app.add_middleware(
         "X-Requires-Purchase",
     ],
 )
+
 
 # Import routers AFTER limiter is set up (to avoid circular imports)
 from routes.basic_auth import router as basic_auth_router
