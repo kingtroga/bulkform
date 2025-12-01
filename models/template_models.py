@@ -12,6 +12,9 @@ from datetime import datetime
 # REQUEST MODELS
 # ============================================================================
 
+class TemplateConversionRequest(BaseModel):
+    fields: Dict[str, list]
+
 class CreateTemplateRequest(BaseModel):
     """Request to create a new custom template (multipart form data)"""
     name: str = Field(..., min_length=1, max_length=200, description="Template name")
@@ -33,7 +36,9 @@ class UpdateTemplateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     description: Optional[str] = Field(None, max_length=1000)
     pdf_url: Optional[str] = None
+    category: Optional[str] = Field(None, max_length=255)
     field_mappings: Optional[Dict[str, Any]] = None
+    remove_fields: Optional[List[str]] = None
     
     class Config:
         json_schema_extra = {
@@ -134,19 +139,45 @@ class TemplateListResponse(BaseModel):
 
 
 class AllTemplatesResponse(BaseModel):
-    """Combined official + custom templates"""
+    # data
     official: List[TemplateResponse]
     custom: List[TemplateResponse]
-    total_official: int
-    total_custom: int
-    
+
+    # totals
+    total_official: int = Field(..., description="Total active official templates")
+    total_custom: int = Field(..., description="Total active custom templates for the user")
+
+    # official paging meta
+    page_official: int
+    page_size_official: int
+    total_pages_official: int
+    has_prev_official: bool
+    has_next_official: bool
+
+    # custom paging meta
+    page_custom: int
+    page_size_custom: int
+    total_pages_custom: int
+    has_prev_custom: bool
+    has_next_custom: bool
+
     class Config:
         json_schema_extra = {
             "example": {
-                "official": [{"id": "off-1", "name": "I-485", "is_official": True}],
-                "custom": [{"id": "cust-1", "name": "My Template", "is_official": False}],
-                "total_official": 1,
-                "total_custom": 1
+                "official": [],
+                "custom": [],
+                "total_official": 120,
+                "total_custom": 37,
+                "page_official": 1,
+                "page_size_official": 24,
+                "total_pages_official": 5,
+                "has_prev_official": False,
+                "has_next_official": True,
+                "page_custom": 1,
+                "page_size_custom": 24,
+                "total_pages_custom": 2,
+                "has_prev_custom": False,
+                "has_next_custom": True,
             }
         }
 
@@ -169,6 +200,7 @@ class TemplateCreatedResponse(BaseModel):
     """Response after creating template"""
     template_id: str
     message: str
+    stripe_price_id: Optional[str] = None
     
     class Config:
         json_schema_extra = {

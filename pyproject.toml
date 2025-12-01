@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "celery>=5.5.3",
     "fastapi>=0.120.1",
     "httpx>=0.28.1",
     "img2pdf>=0.6.1",
@@ -17,10 +18,15 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.20",
+    "redis>=7.0.1",
     "reportlab>=4.4.4",
     "requests>=2.32.5",
+    "slowapi>=0.1.9",
+    "streamlit>=1.51.0",
+    "stripe>=13.2.0",
     "supabase>=2.22.2",
     "uvicorn[standard]>=0.38.0",
+    "zipstream>=1.1.4",
 ]
 
 [project.optional-dependencies]

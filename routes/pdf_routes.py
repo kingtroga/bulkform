@@ -5,11 +5,11 @@ PDF Routes - FULLY ASYNC OPTIMIZED (FIXED)
 ☁️  Supabase Storage for PDFs
 ⚡ TRUE ASYNC - No blocking, no pickle errors!
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form, Query
 from fastapi.responses import FileResponse
 from models.pdf_models import (
     GridResponse, FillTextRequest, FillTextResponse,
-    AddImageRequest, AddImageResponse, GeneratePDFResponse,
+    CoordConversionRequest, AddImageResponse, GeneratePDFResponse,
     SessionInfo, UserSessionsResponse, EncryptedGridResponse,
     EncryptedFillTextRequest, BatchFillTextRequest, EncryptedBatchFillTextRequest,
     BatchFillTextResponse
@@ -42,9 +42,9 @@ session_service = SessionService()
 # - ThreadPoolExecutor is fast enough for our use case
 # - Can handle both I/O and CPU work effectively with enough threads
 
-executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bulkform")
+executor = ThreadPoolExecutor(max_workers=30, thread_name_prefix="bulkform")
 
-print("✅ Async executor initialized: 4 threads")
+print("✅ Async executor initialized: 30 threads")
 
 
 # ============================================================================
@@ -463,6 +463,31 @@ async def generate_pdf(
         user_id = current_user['id']
         num_pages = session["num_pages"]
         
+        # Check if session files exist locally
+        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
+        output_session = f"{pdf_processor.OUTPUT_FOLDER}/{session_id}"
+        
+        # If neither temp nor output exists, try to restore from storage
+        if not os.path.exists(session_temp_path) and not os.path.exists(output_session):
+            print(f"⚠️  Session files not found locally, attempting restore...")
+            
+            # For processing/failed sessions, we need the original PDF
+            original_storage_path = f"{user_id}/{session_id}/original.pdf"
+            
+            try:
+                await run_async(
+                    pdf_processor.restore_session_from_storage,
+                    session_id,
+                    user_id,
+                    original_storage_path
+                )
+                print(f"✅ Session restored from original PDF")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Cannot generate PDF: session files not found and restore failed - {str(e)}"
+                )
+        
         # ⚡ ASYNC: Create PDF
         result = await run_async(
             pdf_processor.create_pdf_with_upload,
@@ -490,6 +515,8 @@ async def generate_pdf(
             total_pages=num_pages
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
         await run_async(
             session_service.update_session_status,
@@ -498,7 +525,64 @@ async def generate_pdf(
         )
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
+# ============================================================================
+# GET ORIGINAL PDF FOR TEMPLATE CREATION
+# ============================================================================
 
+@router.get("/get-original/{session_id}")
+async def get_original_pdf(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Retrieves the original PDF file (before any filling) for template creation.
+    """
+    session = session_service.get_session(session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    # Define paths
+    user_id = current_user['id']
+    local_pdf_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}/original.pdf"
+    
+    # CRITICAL: Always use the original PDF storage path
+    original_storage_path = f"{user_id}/{session_id}/original.pdf"
+    
+    try:
+        # 1. Check if the file still exists locally (best case)
+        if os.path.exists(local_pdf_path):
+            return FileResponse(
+                local_pdf_path,
+                media_type="application/pdf",
+                filename=session["filename"]
+            )
+        
+        # 2. If not local, restore it from Supabase Storage
+        print(f"⚠️ Restoring original PDF from storage: {original_storage_path}")
+
+        # ⚡ ASYNC: Download file from storage to temp folder
+        await run_async(
+            pdf_processor.download_file_from_storage,
+            original_storage_path,
+            local_pdf_path
+        )
+        
+        # Now serve the newly downloaded file
+        return FileResponse(
+            local_pdf_path,
+            media_type="application/pdf",
+            filename=session["filename"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching original PDF: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to retrieve original PDF: {str(e)}"
+        )
+    
 # ============================================================================
 # BATCH OPERATIONS (PARALLEL!)
 # ============================================================================
@@ -654,13 +738,33 @@ async def fill_text_batch_encrypted(
 # ============================================================================
 
 @router.get("/my-sessions", response_model=UserSessionsResponse)
-async def get_my_sessions(current_user: dict = Depends(get_current_user)):
-    """Get all PDF sessions for current user"""
+async def get_my_sessions(
+    current_user: dict = Depends(get_current_user),
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Get PDF sessions for current user (paginated).
+
+    - limit: page size
+    - offset: how many records to skip from the start
+    """
+    user_id = current_user["id"]
+
+    # 1) Get total count for this user
+    total_sessions = await run_async(
+        session_service.count_user_sessions,
+        user_id
+    )
+
+    # 2) Get only the slice we want for this page
     sessions = await run_async(
         session_service.get_user_sessions,
-        current_user['id']
+        user_id,
+        limit,
+        offset,
     )
-    
+
     session_infos = [
         SessionInfo(
             session_id=s["session_id"],
@@ -669,15 +773,17 @@ async def get_my_sessions(current_user: dict = Depends(get_current_user)):
             status=s["status"],
             storage_path=s.get("storage_path"),
             created_at=s["created_at"],
-            updated_at=s["updated_at"]
+            updated_at=s["updated_at"],
         )
         for s in sessions
     ]
-    
+
     return UserSessionsResponse(
-        user_id=current_user['id'],
-        total_sessions=len(session_infos),
-        sessions=session_infos
+        user_id=user_id,
+        total_sessions=total_sessions,  # total in DB, not just this page
+        limit=limit,
+        offset=offset,
+        sessions=session_infos,
     )
 
 
@@ -752,14 +858,11 @@ async def download_pdf(
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
-    if session["status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"PDF not ready (status: {session['status']})"
-        )
-    
     if not session.get("storage_path"):
-        raise HTTPException(status_code=404, detail="PDF not found")
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Completed PDF not found in storage (Current status: {session['status']})."
+        )
     
     try:
         def _create_signed_url():
@@ -773,7 +876,7 @@ async def download_pdf(
                 "download_count": session.get("download_count", 0) + 1,
                 "last_downloaded_at": datetime.now().isoformat()
             }).eq("session_id", session_id).execute()
-        
+
         signed_url, _ = await asyncio.gather(
             run_async(_create_signed_url),
             run_async(_update_download_count)
@@ -947,48 +1050,33 @@ async def get_gridded_page(
 # FONT MANAGEMENT
 # ============================================================================
 
-@router.post("/upload-font/{session_id}")
+@router.post("/upload-font")
 async def upload_custom_font(
-    session_id: str,
     font_name: str = Form(...),
-    font_file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
+    font_file: UploadFile = File(...)
 ):
-    """Upload custom font for session"""
-    session = session_service.get_session(session_id)
-    if not session or session["user_id"] != current_user['id']:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
+    """Upload a custom font (not tied to a session)"""
     if not font_file.filename.lower().endswith('.ttf'):
         raise HTTPException(status_code=400, detail="Only TTF fonts allowed")
-    
+
     try:
-        session_temp_path = f"{pdf_processor.TEMP_FOLDER}/{session_id}"
-        if not os.path.exists(session_temp_path):
-            if session["status"] == "completed":
-                await run_async(
-                    pdf_processor.restore_session_from_storage,
-                    session_id,
-                    current_user['id'],
-                    session["storage_path"]
-                )
-        
-        fonts_folder = f"fonts"
+        fonts_folder = "fonts"
         os.makedirs(fonts_folder, exist_ok=True)
-        
+
         font_path = f"{fonts_folder}/{font_name}.ttf"
-        
+
         font_content = await font_file.read()
         await run_async(lambda: open(font_path, "wb").write(font_content))
-        
+
         return {
             "message": f"Font '{font_name}' uploaded successfully",
             "font_name": font_name,
             "usage": f"Set 'font': '{font_name}' in text_data"
         }
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Font upload failed: {str(e)}")
+
 
 
 @router.get("/available-fonts")
@@ -1001,7 +1089,7 @@ async def get_available_fonts():
         "total": len(AVAILABLE_FONTS),
         "default": "arial" if "arial" in AVAILABLE_FONTS else list(AVAILABLE_FONTS.keys())[0] if AVAILABLE_FONTS else None,
         "custom_fonts_support": True,
-        "upload_endpoint": "POST /api/pdf/upload-font/{session_id}"
+        "upload_endpoint": "POST /api/pdf/upload-font"
     }
 
 
@@ -1023,6 +1111,19 @@ async def pdf_health():
         "grid_size": pdf_processor.GRID_SIZE,
         "dpi": pdf_processor.DPI
     }
+
+@router.post("/convert-coords")
+async def convert_coordinates(
+    data: CoordConversionRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Convert pixel coordinates to grid coordinates"""
+    GRID_SIZE = 150  # Your grid size
+    
+    grid_x = round((data.pixel_x / data.page_width) * GRID_SIZE)
+    grid_y = round((data.pixel_y / data.page_height) * GRID_SIZE)
+    
+    return {"gridX": grid_x, "gridY": grid_y}
 
 
 # ============================================================================

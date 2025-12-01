@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
@@ -7,20 +7,15 @@ from fastapi import HTTPException, status
 from contextlib import asynccontextmanager
 from services.supabase_client import init_supabase
 from services.pdf_processor import TEMP_FOLDER, GRIDDED_FOLDER, OUTPUT_FOLDER
-from routes.basic_auth import router as basic_auth_router
-from routes.token_auth import router as token_auth_router
-from routes.password_auth import router as password_auth_router
-from routes.google_auth import router as google_auth_router
-from routes.user_routes import router as user_router
-from routes.pdf_routes import router as pdf_router
-from routes.profile import router as profile_router
-from routes.template_routes import router as template_router
-from routes.batch_routes import router as batch_router
-from routes.image_routes import router as image_router
 from utils.cleanup import clear_folder
 from pathlib import Path
 from dotenv import load_dotenv
 import secrets
+
+# Rate limiting imports
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from limiter import limiter  # Import from separate file to avoid circular imports
 
 load_dotenv()
 
@@ -82,6 +77,10 @@ app = FastAPI(
     openapi_url="/openapi.json"  # Always available (needed for custom docs)
 )
 
+# Add rate limiting to app (MUST come after app creation)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -89,19 +88,44 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Forms-Needed",
+        "X-Forms-Available",
+        "X-Requires-Purchase",
+    ],
 )
 
-# Include routers (these work normally without auth)
+# Import routers AFTER limiter is set up (to avoid circular imports)
+from routes.basic_auth import router as basic_auth_router
+from routes.token_auth import router as token_auth_router
+from routes.password_auth import router as password_auth_router
+from routes.google_auth import router as google_auth_router
+from routes.email_confirmation import router as email_confirmation_router
+from routes.user_routes import router as user_router
+from routes.pdf_routes import router as pdf_router
+from routes.profile import router as profile_router
+from routes.template_routes import router as template_router
+from routes.batch import router as batch_router
+from routes.image_routes import router as image_router
+from routes.payment_routes import router as payment_router
+from routes.blog_routes import router as blog_router
+from routes.presets_routes import router as preset_router
+
+# Include routers
 app.include_router(basic_auth_router)
 app.include_router(token_auth_router)
 app.include_router(password_auth_router)
 app.include_router(google_auth_router)
+app.include_router(email_confirmation_router)
 app.include_router(user_router)
 app.include_router(profile_router)
 app.include_router(pdf_router)
 app.include_router(template_router)
 app.include_router(batch_router)
 app.include_router(image_router)
+app.include_router(payment_router)
+app.include_router(blog_router)
+app.include_router(preset_router)
 
 # ============================================================================
 # PROTECTED DOCS ENDPOINTS (Production Only)

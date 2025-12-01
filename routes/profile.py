@@ -18,25 +18,35 @@ async def get_my_profile(user: dict = Depends(get_current_user)):
         # Try to get existing profile
         response = supabase.table("profiles").select("*").eq("id", user["id"]).execute()
         
-        # If profile doesn't exist, create it
+        # If profile not found, reinitialize client and try again
         if not response.data or len(response.data) == 0:
-            print(f"⚠️ Profile not found for user {user['id']}, creating...")
+            print(f"⚠️ Profile not found for user {user['id']}, reinitializing client and retrying...")
             
-            # Get user info from auth to populate profile
-            auth_user = supabase.auth.get_user()
-            user_metadata = getattr(auth_user.user, 'user_metadata', {}) or {}
+            # Reinitialize Supabase client
+            supabase = get_supabase()
             
-            # Create profile with available data
-            new_profile = {
-                "id": user["id"],
-                "email": user["email"],
-                "full_name": user_metadata.get("full_name") or user_metadata.get("name"),
-                "avatar_url": user_metadata.get("avatar_url") or user_metadata.get("picture")
-            }
+            # Try again with fresh client
+            response = supabase.table("profiles").select("*").eq("id", user["id"]).execute()
             
-            create_response = supabase.table("profiles").insert(new_profile).execute()
-            print(f"✅ Profile created for user {user['id']}")
-            return create_response.data[0]
+            # If still not found, then actually create it
+            if not response.data or len(response.data) == 0:
+                print(f"⚠️ Profile still not found after retry, creating...")
+                
+                # Get user info from auth to populate profile
+                auth_user = supabase.auth.get_user()
+                user_metadata = getattr(auth_user.user, 'user_metadata', {}) or {}
+                
+                # Create profile with available data
+                new_profile = {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "full_name": user_metadata.get("full_name") or user_metadata.get("name"),
+                    "avatar_url": user_metadata.get("avatar_url") or user_metadata.get("picture")
+                }
+                
+                create_response = supabase.table("profiles").insert(new_profile).execute()
+                print(f"✅ Profile created for user {user['id']}")
+                return create_response.data[0]
         
         return response.data[0]
         
@@ -68,27 +78,37 @@ async def update_my_profile(
         # Check if profile exists first
         check_response = supabase.table("profiles").select("*").eq("id", user["id"]).execute()
         
-        # If profile doesn't exist, create it with the updates
+        # If profile not found, reinitialize and retry
         if not check_response.data or len(check_response.data) == 0:
-            print(f"⚠️ Profile not found for user {user['id']}, creating with updates...")
+            print(f"⚠️ Profile not found for user {user['id']}, reinitializing client and retrying...")
             
-            # Get user info from auth
-            auth_user = supabase.auth.get_user()
-            user_metadata = getattr(auth_user.user, 'user_metadata', {}) or {}
+            # Reinitialize Supabase client
+            supabase = get_supabase()
             
-            # Create profile with update data
-            new_profile = {
-                "id": user["id"],
-                "email": user["email"],
-                "full_name": update_data.get("full_name") or user_metadata.get("full_name") or user_metadata.get("name"),
-                "avatar_url": update_data.get("avatar_url") or user_metadata.get("avatar_url") or user_metadata.get("picture"),
-                "phone": update_data.get("phone"),
-                "company": update_data.get("company")
-            }
+            # Try again
+            check_response = supabase.table("profiles").select("*").eq("id", user["id"]).execute()
             
-            create_response = supabase.table("profiles").insert(new_profile).execute()
-            print(f"✅ Profile created for user {user['id']}")
-            return create_response.data[0]
+            # If still not found, create it with the updates
+            if not check_response.data or len(check_response.data) == 0:
+                print(f"⚠️ Profile still not found after retry, creating with updates...")
+                
+                # Get user info from auth
+                auth_user = supabase.auth.get_user()
+                user_metadata = getattr(auth_user.user, 'user_metadata', {}) or {}
+                
+                # Create profile with update data
+                new_profile = {
+                    "id": user["id"],
+                    "email": user["email"],
+                    "full_name": update_data.get("full_name") or user_metadata.get("full_name") or user_metadata.get("name"),
+                    "avatar_url": update_data.get("avatar_url") or user_metadata.get("avatar_url") or user_metadata.get("picture"),
+                    "phone": update_data.get("phone"),
+                    "company": update_data.get("company")
+                }
+                
+                create_response = supabase.table("profiles").insert(new_profile).execute()
+                print(f"✅ Profile created for user {user['id']}")
+                return create_response.data[0]
         
         # Profile exists, update it
         response = supabase.table("profiles").update(update_data).eq("id", user["id"]).execute()
@@ -146,14 +166,9 @@ async def backfill_missing_profiles(user: dict = Depends(get_current_user)):
     try:
         supabase = get_supabase()
         
-        # Get all auth users (this requires admin privileges)
-        # For now, this will only work if you're using a service_role key
-        # In production, add proper admin authorization
-        
         created_count = 0
         
         # Get current user's profile as a test
-        # In production, you'd loop through all users
         response = supabase.table("profiles").select("*").eq("id", user["id"]).execute()
         
         if not response.data or len(response.data) == 0:

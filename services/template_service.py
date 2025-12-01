@@ -7,10 +7,12 @@ Templates allow users to:
 2. Reuse for multiple clients
 3. Save massive time on repetitive forms
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import uuid
 from datetime import datetime
 from services.supabase_client import get_supabase
+from services.template_cache import cache_template, invalidate_template_cache, invalidate_user_templates
+from datetime import datetime, timezone
 
 
 class TemplateService:
@@ -75,147 +77,84 @@ class TemplateService:
             print(f"❌ Failed to create template: {str(e)}")
             raise Exception(f"Template creation failed: {str(e)}")
     
-    
+    @cache_template(ttl=3600)
     def get_template(self, template_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get a specific template by ID
-        
-        Args:
-            template_id: UUID of template to retrieve
-            user_id: UUID of user (for ownership verification)
-            
-        Returns:
-            Template dict if found and owned by user, None otherwise
-            
-        Example return:
-            {
-                "id": "abc-123",
-                "user_id": "user-456",
-                "name": "I-485 Template",
-                "pdf_url": "https://...",
-                "field_mappings": {...},
-                "created_at": "2025-11-02T10:00:00Z"
-            }
+        Get a specific template by ID (only if active).
+        Return None if not found/unauthorized/inactive.
         """
         try:
-            # Query with ownership verification (RLS handles this too, but double-check)
+            # (official & active) OR (owner & active)
             result = (
                 self.supabase.table(self.table_name)
                 .select("*")
                 .eq("id", template_id)
-                .or_(f"is_official.eq.true,user_id.eq.{user_id}")
+                .or_(f"and(is_official.eq.true,active.eq.true),and(user_id.eq.{user_id},active.eq.true)")
+                .single()
                 .execute()
             )
-            
             if not result.data:
-                print(f"⚠️  Template not found or unauthorized: {template_id}")
+                print(f"⚠️  Template not found/unauthorized/inactive: {template_id}")
                 return None
-            
-            template = result.data[0]
-            print(f"✅ Template retrieved: {template['name']}")
-            
-            return template
-        
+            print(f"✅ Template retrieved: {result.data['name']}")
+            return result.data
         except Exception as e:
             print(f"❌ Failed to get template: {str(e)}")
             return None
     
-    
-    def list_templates(
-        self,
-        user_id: str,
-        limit: int = 100,
-        offset: int = 0
-    ) -> List[Dict[str, Any]]:
-        """
-        List all templates for a user
-        
-        Args:
-            user_id: UUID of user
-            limit: Max number of templates to return (default 100)
-            offset: Number of templates to skip (for pagination)
-            
-        Returns:
-            List of template dictionaries, newest first
-        """
+    def list_templates(self, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         try:
-            # Query user's templates, ordered by newest first
-            result = self.supabase.table(self.table_name).select("*").eq(
-                "user_id", user_id
-            ).order(
-                "created_at", desc=True
-            ).limit(limit).offset(offset).execute()
-            
-            templates = result.data if result.data else []
-            
-            print(f"✅ Retrieved {len(templates)} templates for user")
-            
+            result = (
+                self.supabase.table(self.table_name)
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("is_official", False)
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .offset(offset)
+                .execute()
+            )
+            templates = result.data or []
+            print(f"✅ Retrieved {len(templates)} active templates for user")
             return templates
-        
         except Exception as e:
             print(f"❌ Failed to list templates: {str(e)}")
             return []
+
     
     
-    def update_template(
-        self,
-        template_id: str,
-        user_id: str,
-        updates: Dict[str, Any]
-    ) -> bool:
-        """
-        Update an existing template
-        
-        Args:
-            template_id: UUID of template to update
-            user_id: UUID of user (for ownership verification)
-            updates: Dictionary of fields to update
-                Allowed fields: name, description, pdf_url, field_mappings
-                
-        Returns:
-            True if successful, False otherwise
-            
-        Example:
-            update_template(
-                "abc-123",
-                "user-456",
-                {"name": "Updated I-485", "description": "New version"}
-            )
-        """
+    def update_template(self, template_id: str, user_id: str, updates: Dict[str, Any]) -> bool:
         try:
-            # Verify ownership first
             existing = self.get_template(template_id, user_id)
             if not existing:
-                print(f"⚠️  Cannot update - template not found or unauthorized")
+                print("⚠️  Cannot update - template not found/unauthorized/inactive")
                 return False
-            
-            # Filter allowed update fields
-            allowed_fields = {"name", "description", "pdf_url", "field_mappings"}
-            filtered_updates = {
-                key: value for key, value in updates.items()
-                if key in allowed_fields
-            }
-            
+
+            allowed_fields = {"name", "description", "pdf_url", "field_mappings", "category"}
+            filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
             if not filtered_updates:
-                print(f"⚠️  No valid fields to update")
+                print("⚠️  No valid fields to update")
                 return False
-            
-            # Update in database
-            result = self.supabase.table(self.table_name).update(
-                filtered_updates
-            ).eq(
-                "id", template_id
-            ).eq(
-                "user_id", user_id
-            ).execute()
-            
+
+            filtered_updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            result = (
+                self.supabase.table(self.table_name)
+                .update(filtered_updates)
+                .eq("id", template_id)
+                .eq("user_id", user_id)
+                .eq("active", True)
+                .execute()
+            )
+
             if not result.data:
-                print(f"❌ Update failed - no data returned")
+                print("❌ Update failed - no data returned")
                 return False
-            
+
             print(f"✅ Template updated: {template_id}")
+            invalidate_template_cache(template_id, user_id)
             return True
-        
         except Exception as e:
             print(f"❌ Failed to update template: {str(e)}")
             return False
@@ -254,6 +193,7 @@ class TemplateService:
             # So we can't check result.data, just assume success if no exception
             
             print(f"✅ Template deleted: {template_id}")
+            invalidate_template_cache(template_id, user_id)
             return True
         
         except Exception as e:
@@ -261,66 +201,41 @@ class TemplateService:
             return False
     
     
-    def get_template_by_name(
-        self,
-        user_id: str,
-        name: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get a template by name (case-insensitive)
-        
-        Args:
-            user_id: UUID of user
-            name: Name of template to find
-            
-        Returns:
-            Template dict if found, None otherwise
-            
-        Useful for:
-            - Checking if template name already exists
-            - Quick lookup by name
-        """
+    def get_template_by_name(self, user_id: str, name: str) -> Optional[Dict[str, Any]]:
         try:
             result = (
                 self.supabase.table(self.table_name)
                 .select("*")
                 .or_(
-                    f"and(is_official.eq.true,name.ilike.*{name}*),and(user_id.eq.{user_id},name.ilike.*{name}*)"
+                    # official & active & name ilike OR owner & active & name ilike
+                    f"and(is_official.eq.true,active.eq.true,name.ilike.*{name}*),"
+                    f"and(user_id.eq.{user_id},active.eq.true,name.ilike.*{name}*)"
                 )
+                .limit(1)
                 .execute()
             )
-
-            
             if not result.data:
                 return None
-            
             return result.data[0]
-        
         except Exception as e:
             print(f"❌ Failed to get template by name: {str(e)}")
             return None
     
-    
     def count_user_templates(self, user_id: str) -> int:
-        """
-        Count total templates for a user
-        
-        Args:
-            user_id: UUID of user
-            
-        Returns:
-            Number of templates
-        """
         try:
-            result = self.supabase.table(self.table_name).select(
-                "id", count="exact"
-            ).eq("user_id", user_id).execute()
-            
-            return result.count if result.count else 0
-        
+            result = (
+                self.supabase.table(self.table_name)
+                .select("id", count="exact")
+                .eq("user_id", user_id)
+                .eq("is_official", False)
+                .eq("active", True)
+                .execute()
+            )
+            return result.count or 0
         except Exception as e:
             print(f"❌ Failed to count templates: {str(e)}")
             return 0
+
     
     
     def validate_field_mappings(self, field_mappings: Dict[str, Any]) -> bool:
@@ -391,84 +306,66 @@ class TemplateService:
         user_id: str,
         name: str,
         pdf_url: str,
-        field_mappings: Dict[str, Any],
+        field_mappings: dict,
         official_form_id: str,
         category: str = "immigration",
-        description: Optional[str] = None,
-        price: float = 0.00
+        description: str = None,
+        price: float = 0.00,
+        stripe_price_id: str = None,
+        complexity: str = "simple"
     ) -> str:
         """
-        Create an official BulkForm template
-        
-        🔒 SECURITY: Only admins can create official templates!
-        This method checks if user_id is in the admins table.
+        Create official BulkForm template with Stripe integration
         
         Args:
-            user_id: Your admin user_id
-            name: Template name (e.g., "USCIS Form I-485")
-            pdf_url: URL to blank PDF
+            user_id: Admin user ID (must be admin)
+            name: Template name
+            pdf_url: Storage path to PDF
             field_mappings: Field coordinate mappings
-            official_form_id: Form identifier (e.g., "i-485")
-            category: Template category (default: "immigration")
+            official_form_id: Form ID (e.g., 'i-485')
+            category: Template category
             description: Optional description
-            price: Price in dollars (default: 0.00 = free)
-            
-        Returns:
-            UUID string of created official template
-            
-        Raises:
-            Exception: If user is not an admin
-            
-        Example:
-            template_id = service.create_official_template(
-                user_id="your-admin-id",
-                name="USCIS Form I-485",
-                pdf_url="https://uscis.gov/i-485.pdf",
-                field_mappings={...},
-                official_form_id="i-485"
-            )
-        """
-        try:
-            # 🔒 SECURITY CHECK: Verify user is admin
-            if not self.is_admin(user_id):
-                raise Exception(
-                    f"Permission denied: User {user_id} is not an admin. "
-                    "Only admins can create official templates."
-                )
-            
-            # Validate field mappings
-            if not self.validate_field_mappings(field_mappings):
-                raise Exception("Invalid field mappings")
-            
-            # Prepare data with official flags
-            template_data = {
-                "user_id": user_id,
-                "name": name,
-                "pdf_url": pdf_url,
-                "field_mappings": field_mappings,
-                "description": description,
-                "is_official": True,
-                "official_form_id": official_form_id.lower(),
-                "category": category,
-                "price": price,
-                "downloads": 0
-            }
-            
-            # Insert using service role (bypasses RLS)
-            result = self.supabase.table(self.table_name).insert(template_data).execute()
-            
-            if not result.data:
-                raise Exception("Failed to create official template - no data returned")
-            
-            template_id = result.data[0]["id"]
-            print(f"⭐ Official template created by admin: {template_id} (form: {official_form_id})")
-            
-            return template_id
+            price: Annual subscription price in dollars
+            stripe_price_id: Stripe Price ID (from Stripe API)
+            complexity: 'simple', 'medium', or 'complex'
         
-        except Exception as e:
-            print(f"❌ Failed to create official template: {str(e)}")
-            raise Exception(f"Official template creation failed: {str(e)}")
-    
+        Returns:
+            template_id: UUID of created template
+        
+        Raises:
+            ValueError: If user is not admin
+        """
+        # Check if user is admin
+        if not self.is_admin(user_id):
+            raise ValueError("Only admins can create official templates")
+        
+        template_id = str(uuid.uuid4())
+        
+        # Insert into database
+        self.supabase.table(self.table_name).insert({
+            'id': template_id,
+            'user_id': user_id,
+            'name': name,
+            'pdf_url': pdf_url,
+            'field_mappings': field_mappings,
+            'is_official': True,
+            'official_form_id': official_form_id,
+            'category': category,
+            'description': description,
+            'price': str(price),  # Store as string (e.g., "10.00")
+            'stripe_price_id': stripe_price_id,
+            'complexity': complexity,
+            'rental_duration_days': 365,  # Annual subscription
+            'created_at': 'now()'
+        }).execute()
+        
+        print(f"✅ Official template created: {template_id}")
+        print(f"   Name: {name}")
+        print(f"   Form ID: {official_form_id}")
+        print(f"   Price: ${price}/year")
+        print(f"   Stripe Price ID: {stripe_price_id}")
+        
+        return template_id
     
     def is_admin(self, user_id: str) -> bool:
         """
@@ -521,157 +418,89 @@ class TemplateService:
             return []
     
     
-    def list_official_templates(
-        self,
-        category: Optional[str] = None,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """
-        List official BulkForm templates (publicly available)
-        
-        Args:
-            category: Filter by category (e.g., "immigration", "tax", "hr")
-            limit: Max number to return
-            
-        Returns:
-            List of official templates
-            
-        Use case:
-            Show all pre-made templates in marketplace/library
-        """
+    def list_official_templates(self, category: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
         try:
-            query = self.supabase.table(self.table_name).select("*").eq(
-                "is_official", True
+            query = (
+                self.supabase.table(self.table_name)
+                .select("*")
+                .eq("is_official", True)
+                .eq("active", True)
             )
-            
             if category:
                 query = query.eq("category", category)
-            
             result = query.order("downloads", desc=True).limit(limit).execute()
-            
-            templates = result.data if result.data else []
-            
-            print(f"✅ Retrieved {len(templates)} official templates")
-            
+            templates = result.data or []
+            print(f"✅ Retrieved {len(templates)} active official templates")
             return templates
-        
         except Exception as e:
             print(f"❌ Failed to list official templates: {str(e)}")
             return []
+
     
     
-    def get_official_template_by_form_id(
-        self,
-        form_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Get official template by form ID (e.g., "i-485")
-        
-        Args:
-            form_id: Official form identifier (lowercase)
-            
-        Returns:
-            Template dict if found
-            
-        Use case:
-            Quick access to common forms
-        """
+    def get_official_template_by_form_id(self, form_id: str) -> Optional[Dict[str, Any]]:
         try:
-            result = self.supabase.table(self.table_name).select("*").eq(
-                "is_official", True
-            ).eq(
-                "official_form_id", form_id.lower()
-            ).execute()
-            
-            if not result.data:
-                print(f"⚠️  Official template not found: {form_id}")
-                return None
-            
-            return result.data[0]
-        
+            result = (
+                self.supabase.table(self.table_name)
+                .select("*")
+                .eq("is_official", True)
+                .eq("active", True)
+                .eq("official_form_id", form_id.lower())
+                .single()
+                .execute()
+            )
+            return result.data
         except Exception as e:
             print(f"❌ Failed to get official template: {str(e)}")
-            return None
-    
+            return None    
     
     def get_template_categories(self) -> List[Dict[str, Any]]:
-        """
-        Get all available template categories with counts
-        
-        Returns:
-            List of categories with template counts
-            
-        Example return:
-            [
-                {"category": "immigration", "count": 15},
-                {"category": "tax", "count": 8},
-                {"category": "hr", "count": 5}
-            ]
-        """
         try:
-            # This requires a custom query
-            result = self.supabase.table(self.table_name).select(
-                "category"
-            ).eq("is_official", True).execute()
-            
+            result = (
+                self.supabase.table(self.table_name)
+                .select("category")
+                .eq("is_official", True)
+                .eq("active", True)
+                .execute()
+            )
             if not result.data:
                 return []
-            
-            # Count categories manually (Supabase doesn't support GROUP BY easily)
-            category_counts = {}
+            counts: Dict[str, int] = {}
             for row in result.data:
-                cat = row.get("category", "uncategorized")
-                category_counts[cat] = category_counts.get(cat, 0) + 1
-            
-            categories = [
-                {"category": cat, "count": count}
-                for cat, count in category_counts.items()
-            ]
-            
+                cat = row.get("category") or "uncategorized"
+                counts[cat] = counts.get(cat, 0) + 1
+            categories = [{"category": c, "count": n} for c, n in counts.items()]
             print(f"✅ Found {len(categories)} template categories")
-            
             return categories
-        
         except Exception as e:
             print(f"❌ Failed to get categories: {str(e)}")
             return []
+
     
     
     def increment_template_downloads(self, template_id: str) -> bool:
-        """
-        Increment download count for official template
-        
-        Args:
-            template_id: UUID of template
-            
-        Returns:
-            True if successful
-            
-        Use case:
-            Track popularity of official templates
-        """
         try:
-            # Get current downloads
-            template = self.supabase.table(self.table_name).select(
-                "downloads"
-            ).eq("id", template_id).eq("is_official", True).execute()
-            
-            if not template.data:
+            tpl = (
+                self.supabase.table(self.table_name)
+                .select("downloads")
+                .eq("id", template_id)
+                .eq("is_official", True)
+                .eq("active", True)
+                .single()
+                .execute()
+            )
+            if not tpl.data:
                 return False
-            
-            current = template.data[0].get("downloads", 0)
-            
-            # Increment
-            self.supabase.table(self.table_name).update({
-                "downloads": current + 1
-            }).eq("id", template_id).execute()
-            
+            current = tpl.data.get("downloads", 0)
+            self.supabase.table(self.table_name).update(
+                {"downloads": current + 1, "updated_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", template_id).execute()
             print(f"✅ Downloads incremented: {template_id}")
             return True
-        
         except Exception as e:
             print(f"❌ Failed to increment downloads: {str(e)}")
             return False
+
     
     
     def list_all_templates(
@@ -716,6 +545,133 @@ class TemplateService:
         print(f"✅ Retrieved {total} total templates ({len(result['official'])} official, {len(result['custom'])} custom)")
         
         return result
+    
+    def get_template_pdf_url(self, template_id: str) -> Optional[str]:
+        try:
+            result = (
+                self.supabase.table(self.table_name)
+                .select("pdf_url,active")
+                .eq("id", template_id)
+                .eq("active", True)
+                .single()
+                .execute()
+            )
+            if result.data and 'pdf_url' in result.data:
+                print(f"✅ PDF URL retrieved for template {template_id[:8]}...")
+                return result.data['pdf_url']
+            print(f"⚠️ Template not found or inactive: {template_id}")
+            return None
+        except Exception as e:
+            print(f"❌ Failed to get template PDF URL: {str(e)}")
+            return None
+
+        
+    def soft_delete_template(self, template_id: str, user_id: str) -> bool:
+        """
+        Soft delete a template (active -> false) owned by user_id.
+        Returns True if one row was updated.
+        """
+        try:
+            # Only touch records that are still active
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            result = (
+                self.supabase.table(self.table_name)
+                .update({"active": False, "updated_at": now_iso})
+                .eq("id", template_id)
+                .eq("user_id", user_id)
+                .eq("active", True)
+                .execute()
+            )
+
+            # supabase-py returns updated rows in .data for UPDATE
+            updated = result.data or []
+            if len(updated) == 1:
+                print(f"✅ Template soft-deleted: {template_id}")
+                invalidate_template_cache(template_id, user_id)
+                return True
+
+            # If it was already inactive, you can treat as success (idempotent)
+            # or return False — choose your policy. Here we treat as success:
+            already_inactive = (
+                self.supabase.table(self.table_name)
+                .select("id,active")
+                .eq("id", template_id)
+                .eq("user_id", user_id)
+                .single()
+                .execute()
+            ).data
+            if already_inactive and already_inactive.get("active") is False:
+                print(f"ℹ️  Template already inactive: {template_id}")
+                return True
+
+            print("⚠️  Soft delete matched no rows.")
+            return False
+
+        except Exception as e:
+            print(f"❌ Failed to soft-delete template: {str(e)}")
+            return False
+        
+    def list_templates_paged(
+        self, user_id: str, page: int = 1, page_size: int = 24
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Paged custom templates (active only).
+        Returns (items, total_count)
+        """
+        try:
+            page = max(1, page)
+            page_size = max(1, min(page_size, 100))
+            start = (page - 1) * page_size
+            end = start + page_size - 1
+
+            q = (
+                self.supabase.table(self.table_name)
+                .select("*", count="exact")
+                .eq("user_id", user_id)
+                .eq("is_official", False)
+                .eq("active", True)
+                .order("created_at", desc=True)
+                .range(start, end)
+            )
+            res = q.execute()
+            items = res.data or []
+            total = res.count or 0
+            return items, total
+        except Exception as e:
+            print(f"❌ Failed to list custom templates (paged): {e}")
+            return [], 0
+
+    def list_official_templates_paged(
+        self, page: int = 1, page_size: int = 24, category: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Paged official templates (active only).
+        Returns (items, total_count)
+        """
+        try:
+            page = max(1, page)
+            page_size = max(1, min(page_size, 100))
+            start = (page - 1) * page_size
+            end = start + page_size - 1
+
+            q = (
+                self.supabase.table(self.table_name)
+                .select("*", count="exact")
+                .eq("is_official", True)
+                .eq("active", True)
+            )
+            if category:
+                q = q.eq("category", category)
+
+            q = q.order("downloads", desc=True).range(start, end)
+            res = q.execute()
+            items = res.data or []
+            total = res.count or 0
+            return items, total
+        except Exception as e:
+            print(f"❌ Failed to list official templates (paged): {e}")
+            return [], 0
 
 
 # ============================================================================
