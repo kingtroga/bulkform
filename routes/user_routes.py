@@ -29,3 +29,23 @@ async def hello_user(user: dict = Depends(get_current_user_optional)):
         "message": "Hello! Sign in for a personalized experience.",
         "authenticated": False
     }
+
+@router.get("/check-admin")
+async def check_admin_status(current_user: dict = Depends(get_current_user)):
+    """Check if current user is admin"""
+    try:
+        from services.supabase_client import get_supabase
+        supabase = get_supabase()
+        
+        result = supabase.table("admins").select("*").eq(
+            "user_id", current_user["id"]
+        ).execute()
+        
+        is_admin = len(result.data) > 0
+        
+        return {
+            "is_admin": is_admin,
+            "user_id": current_user["id"]
+        }
+    except Exception as e:
+        return {"is_admin": False, "error": str(e)}
