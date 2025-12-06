@@ -284,6 +284,71 @@ class PDFProcessor:
         if successful_writes == 0 and len(text_data) > 0:
             raise RuntimeError(f"Failed to write any of the {len(text_data)} text items")
     
+    def write_text_on_image_preview(self, image_path: str, text_items: list):
+        """
+        Write text directly on PNG image (for live preview)
+        
+        Similar to write_text_on_page but:
+        - Works on existing PNG (not session-based)
+        - Modifies image in-place
+        - Used for temporary previews
+        
+        Args:
+            image_path: Path to PNG file
+            text_items: [{"x": 10, "y": 20, "text": "...", "size": 30, "align": "center", "font": "arial"}]
+        
+        Returns:
+            None (modifies image in-place)
+        """   
+        try:
+            # Load image
+            img = Image.open(image_path)
+            width, height = img.size
+            draw = ImageDraw.Draw(img)
+            
+            cell_width = width / self.GRID_SIZE
+            cell_height = height / self.GRID_SIZE
+            
+            for item in text_items:
+                # Extract field data
+                grid_x = item['x']
+                grid_y = item['y']
+                text = item['text']
+                font_size = item.get('size', 20)
+                alignment = item.get('align', 'center')
+                font_name = item.get('font', 'arial')
+                
+                # Convert grid to pixel
+                pixel_x = int(grid_x * cell_width)
+                pixel_y = int(grid_y * cell_height)
+                
+                # Load font with fallback
+                try:
+                    font = self._load_font(None, font_name, font_size)
+                except Exception as e:
+                    print(f"⚠️  Font '{font_name}' failed, using default: {e}")
+                    font = ImageFont.load_default()
+                
+                # Adjust Y position based on alignment
+                if alignment == 'bottom':
+                    adjusted_y = pixel_y - font_size
+                elif alignment == 'center':
+                    adjusted_y = pixel_y - (font_size // 2)
+                else:  # top
+                    adjusted_y = pixel_y
+                
+                # Draw text
+                draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
+                print(f"  ✅ Preview: '{text}' at grid ({grid_x}, {grid_y}) [size: {font_size}, align: {alignment}]")
+            
+            # Save modified image
+            img.save(image_path)
+            print(f"✅ Preview image saved: {image_path}")
+            
+        except Exception as e:
+            print(f"❌ Preview rendering failed: {str(e)}")
+            raise Exception(f"Failed to render preview: {str(e)}")
+    
     def _load_font(self, session_id: str, font_name: str, font_size: int):
         """
         Load font with fallback priority:
