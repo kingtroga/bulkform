@@ -19,8 +19,11 @@ RUN pip install --no-cache-dir uv && \
 # Copy application code
 COPY . .
 
-# Expose port (Render will override with $PORT)
+# Make start script executable
+COPY start.sh ./
+RUN chmod +x start.sh
+
 EXPOSE 8000
 
-# Start command
-CMD uv run uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
+# Run both web + worker
+CMD ["./start.sh"]
