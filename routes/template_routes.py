@@ -1,18 +1,6 @@
 """
 Template Routes
 API endpoints for managing PDF form templates
-
-Endpoints:
-- POST   /api/templates              - Create custom template (with file upload!)
-- GET    /api/templates              - List user's custom templates
-- GET    /api/templates/all          - List all (official + custom)
-- GET    /api/templates/{id}         - Get specific template
-- PUT    /api/templates/{id}         - Update template
-- DELETE /api/templates/{id}         - Delete template
-- GET    /api/templates/official     - List official templates
-- GET    /api/templates/official/{form_id} - Get official by form ID
-- POST   /api/templates/official     - Create official (admin only)
-- GET    /api/templates/categories   - List categories with counts
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile

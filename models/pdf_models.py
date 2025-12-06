@@ -160,3 +160,9 @@ class UserSessionsResponse(BaseModel):
     limit: int                   
     offset: int                  
     sessions: List[SessionInfo]
+
+class FieldPreviewRequest(BaseModel):
+    """Request model for field preview"""
+    session_id: str
+    page: int
+    field: dict 

@@ -12,7 +12,7 @@ from models.pdf_models import (
     CoordConversionRequest, AddImageResponse, GeneratePDFResponse,
     SessionInfo, UserSessionsResponse, EncryptedGridResponse,
     EncryptedFillTextRequest, BatchFillTextRequest, EncryptedBatchFillTextRequest,
-    BatchFillTextResponse
+    BatchFillTextResponse, FieldPreviewRequest
 )
 from utils.encryption import encrypt_grid_data, decrypt_data
 from services.pdf_processor import PDFProcessor
@@ -445,6 +445,80 @@ async def _add_image_helper(
         raise HTTPException(status_code=500, detail=f"Add {subfolder} failed: {str(e)}")
 
 
+@router.post("/preview-field")
+async def preview_single_field(
+    request: FieldPreviewRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Render a SINGLE field on a page and return PNG preview
+    
+    🎯 USE CASE: Admin template creator - live field preview before adding
+    
+    This does NOT save to session - purely for visual confirmation.
+    User sees the field rendered, can confirm or try different position.
+    
+    **Flow:**
+    1. Load original page image
+    2. Draw field with test value
+    3. Return temporary preview image
+    4. Delete preview after sending
+    
+    **Returns:** PNG image with field rendered
+    """
+    session = session_service.get_session(request.session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    try:
+        # Get original page image
+        page_path = f"{pdf_processor.TEMP_FOLDER}/{request.session_id}/page_{request.page}.png"
+        
+        if not os.path.exists(page_path):
+            raise HTTPException(status_code=404, detail="Page not found. Session may need to be restored.")
+        
+        # Create temporary preview (don't modify original)
+        preview_path = f"{pdf_processor.TEMP_FOLDER}/{request.session_id}/preview_temp_{request.page}.png"
+        
+        # Copy original to preview
+        import shutil
+        await run_async(shutil.copy, page_path, preview_path)
+        
+        # Prepare text data for rendering
+        field_data = request.field
+        text_items = [{
+            'x': field_data['gridX'],
+            'y': field_data['gridY'],
+            'text': field_data['value'],  # Use test value!
+            'size': field_data.get('size', 12),
+            'align': field_data.get('align', 'center'),
+            'font': field_data.get('font', 'arial')
+        }]
+        
+        # Draw field on preview using helper function
+        await run_async(
+            pdf_processor.write_text_on_image_preview,
+            preview_path,
+            text_items
+        )
+        
+        # Return preview image
+        response = FileResponse(preview_path, media_type="image/png")
+        
+        # Cleanup after sending (async)
+        async def cleanup():
+            await run_async(lambda: os.path.exists(preview_path) and os.remove(preview_path))
+        
+        asyncio.create_task(cleanup())
+        
+        return response
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Preview field failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+    
 # ============================================================================
 # GENERATE PDF
 # ============================================================================
