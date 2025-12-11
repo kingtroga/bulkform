@@ -740,11 +740,23 @@ class PDFProcessor:
         except:
             font = ImageFont.load_default()
         
-        for i in range(self.GRID_SIZE + 1):  # All lines
+        for i in range(self.GRID_SIZE + 1):
             x = int(i * cell_width)
             y = int(i * cell_height)
-            draw.text((x + 2, 2), f"{i}", fill=(255, 0, 0), font=font)
-            draw.text((2, y + 2), f"{i}", fill=(0, 0, 255), font=font)
+            
+            # X-axis labels (vertical text)
+            text = f"{i}"
+            # Create a temporary image for the text
+            txt_img = Image.new('RGBA', (100, 100), (255, 255, 255, 0))
+            txt_draw = ImageDraw.Draw(txt_img)
+            txt_draw.text((0, 0), text, fill=(255, 0, 0), font=font)
+            # Rotate 90 degrees counter-clockwise
+            txt_img = txt_img.rotate(90, expand=True)
+            # Paste onto main image
+            img.paste(txt_img, (x + 2, 2), txt_img)
+            
+            # Y-axis labels (horizontal)
+            draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
         print(f"Applied grid to page {page_num}")
