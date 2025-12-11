@@ -18,6 +18,7 @@ from utils.encryption import encrypt_grid_data, decrypt_data
 from services.pdf_processor import PDFProcessor
 from services.session_service import SessionService
 from services.auth import get_current_user
+from starlette.background import BackgroundTask
 import os
 import shutil
 import uuid
@@ -470,6 +471,8 @@ async def preview_single_field(
     if not session or session["user_id"] != current_user['id']:
         raise HTTPException(status_code=403, detail="Unauthorized")
     
+    preview_path = None
+    
     try:
         # Get original page image
         page_path = f"{pdf_processor.TEMP_FOLDER}/{request.session_id}/page_{request.page}.png"
@@ -502,23 +505,27 @@ async def preview_single_field(
             text_items
         )
         
-        # Return preview image
-        response = FileResponse(preview_path, media_type="image/png")
-        
-        # Cleanup after sending (async)
-        async def cleanup():
-            await run_async(lambda: os.path.exists(preview_path) and os.remove(preview_path))
-        
-        asyncio.create_task(cleanup())
-        
-        return response
+        # Return preview image with background task to cleanup
+        return FileResponse(
+            preview_path, 
+            media_type="image/png",
+            background=BackgroundTask(
+                lambda: os.path.exists(preview_path) and os.remove(preview_path)
+            )
+        )
     
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ Preview field failed: {str(e)}")
+        # Cleanup on error
+        if preview_path and os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+            except:
+                pass
         raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
-    
+      
 # ============================================================================
 # GENERATE PDF
 # ============================================================================
