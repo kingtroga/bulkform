@@ -740,7 +740,7 @@ class PDFProcessor:
         except:
             font = ImageFont.load_default()
         
-        for i in range(0, self.GRID_SIZE + 1, 10):  # Every 10 lines
+        for i in range(self.GRID_SIZE + 1):  # All lines
             x = int(i * cell_width)
             y = int(i * cell_height)
             draw.text((x + 2, 2), f"{i}", fill=(255, 0, 0), font=font)
