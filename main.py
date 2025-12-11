@@ -90,7 +90,7 @@ def display_image(image_path):
     img.show()
 
 def write_text_on_image(page_num, text_data):
-    """Write text on image at specified coordinates"""
+    """Write text on image at specified coordinates with alignment support"""
     input_path = f"{TEMP_FOLDER}/page_{page_num}.png"
     output_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
     
@@ -107,6 +107,7 @@ def write_text_on_image(page_num, text_data):
         grid_y = item['y']
         text = item['text']
         font_size = item.get('size', 20)
+        alignment = item.get('align', 'top')  # NEW: Get alignment, default to 'top'
         
         pixel_x = int(grid_x * cell_width)
         pixel_y = int(grid_y * cell_height)
@@ -117,8 +118,16 @@ def write_text_on_image(page_num, text_data):
         except:
             font = ImageFont.load_default()
         
-        draw.text((pixel_x, pixel_y), text, fill=(0, 0, 0), font=font)
-        print(f"  Wrote '{text}' at ({grid_x}, {grid_y})")
+        # NEW: Adjust Y position based on alignment
+        if alignment == 'bottom':
+            adjusted_y = pixel_y - font_size
+        elif alignment == 'center':
+            adjusted_y = pixel_y - (font_size // 2)
+        else:  # 'top' (default)
+            adjusted_y = pixel_y
+        
+        draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
+        print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [align: {alignment}]")
     
     img.save(output_path)
     print(f"Saved filled page: {output_path}")
@@ -193,6 +202,7 @@ def main():
             
             text_data = []
             print("\nEnter text data (empty text to finish):")
+            print("Alignment options: 'top' (default), 'center', 'bottom'")
             while True:
                 text = input("  Text: ").strip()
                 if not text:
@@ -200,8 +210,20 @@ def main():
                 x = int(input("  Grid X: "))
                 y = int(input("  Grid Y: "))
                 size = int(input("  Font size (default 20): ") or "20")
+                align = input("  Alignment (top/center/bottom, default 'top'): ").strip().lower() or "top"
                 
-                text_data.append({'x': x, 'y': y, 'text': text, 'size': size})
+                # Validate alignment
+                if align not in ['top', 'center', 'bottom']:
+                    print(f"  ⚠️  Invalid alignment '{align}', using 'top'")
+                    align = 'top'
+                
+                text_data.append({
+                    'x': x, 
+                    'y': y, 
+                    'text': text, 
+                    'size': size,
+                    'align': align
+                })
             
             if text_data:
                 write_text_on_image(page, text_data)
