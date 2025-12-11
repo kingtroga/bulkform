@@ -753,7 +753,7 @@ class PDFProcessor:
             # Rotate 90 degrees counter-clockwise
             txt_img = txt_img.rotate(90, expand=True)
             # Paste at the top (y=0)
-            img.paste(txt_img, (x + 2, -3), txt_img)
+            img.paste(txt_img, (x + 2, -4.5), txt_img)
             
             # Y-axis labels (horizontal at left)
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
