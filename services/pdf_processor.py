@@ -744,24 +744,24 @@ class PDFProcessor:
             x = int(i * cell_width)
             y = int(i * cell_height)
             
-            # X-axis labels (vertical text)
+            # X-axis labels (vertical text at top)
             text = f"{i}"
             # Create a temporary image for the text
-            txt_img = Image.new('RGBA', (100, 100), (255, 255, 255, 0))
+            txt_img = Image.new('RGBA', (font_size * 3, font_size * len(text) * 2), (255, 255, 255, 0))
             txt_draw = ImageDraw.Draw(txt_img)
             txt_draw.text((0, 0), text, fill=(255, 0, 0), font=font)
             # Rotate 90 degrees counter-clockwise
             txt_img = txt_img.rotate(90, expand=True)
-            # Paste onto main image
-            img.paste(txt_img, (x + 2, 2), txt_img)
+            # Paste at the top (y=0)
+            img.paste(txt_img, (x + 2, 0), txt_img)
             
-            # Y-axis labels (horizontal)
+            # Y-axis labels (horizontal at left)
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
         print(f"Applied grid to page {page_num}")
         return output_path
-    
+
     def download_file_from_storage(self, storage_path: str, local_path: str):
         """
         Downloads a file from the configured Supabase Storage bucket 
