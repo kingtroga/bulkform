@@ -348,6 +348,67 @@ class PDFProcessor:
         except Exception as e:
             print(f"❌ Preview rendering failed: {str(e)}")
             raise Exception(f"Failed to render preview: {str(e)}")
+        
+    def add_images_to_preview(self, preview_path: str, image_data: list):
+        """
+        Add images to an existing PNG preview (for live preview modal)
+        
+        Args:
+            preview_path: Path to preview PNG
+            image_data: List of dicts with 'x', 'y', 'image_path', optional 'width', 'height'
+        """
+        
+        try:
+            # Load the preview image
+            base_image = Image.open(preview_path).convert('RGBA')
+            page_width, page_height = base_image.size
+            
+            # Process each image
+            for img_item in image_data:
+                grid_x = img_item['x']
+                grid_y = img_item['y']
+                image_path = img_item['image_path']
+                
+                # Convert grid to pixel coordinates
+                pixel_x = int((grid_x / self.GRID_SIZE) * page_width)
+                pixel_y = int((grid_y / self.GRID_SIZE) * page_height)
+                
+                # Load and process the image to place
+                overlay_img = Image.open(image_path).convert('RGBA')
+                
+                # Resize if dimensions specified
+                if 'width' in img_item and 'height' in img_item and img_item['width'] and img_item['height']:
+                    overlay_img = overlay_img.resize(
+                        (int(img_item['width']), int(img_item['height'])),
+                        Image.Resampling.LANCZOS
+                    )
+                elif 'width' in img_item and img_item['width']:
+                    # Width only - maintain aspect ratio
+                    aspect_ratio = overlay_img.height / overlay_img.width
+                    new_height = int(img_item['width'] * aspect_ratio)
+                    overlay_img = overlay_img.resize(
+                        (int(img_item['width']), new_height),
+                        Image.Resampling.LANCZOS
+                    )
+                elif 'height' in img_item and img_item['height']:
+                    # Height only - maintain aspect ratio
+                    aspect_ratio = overlay_img.width / overlay_img.height
+                    new_width = int(img_item['height'] * aspect_ratio)
+                    overlay_img = overlay_img.resize(
+                        (new_width, int(img_item['height'])),
+                        Image.Resampling.LANCZOS
+                    )
+                
+                # Paste the overlay image onto the base
+                base_image.paste(overlay_img, (pixel_x, pixel_y), overlay_img)
+            
+            # Save the modified preview
+            base_image.save(preview_path, 'PNG')
+            print(f"✅ Preview updated with {len(image_data)} image(s)")
+            
+        except Exception as e:
+            print(f"❌ Failed to add images to preview: {str(e)}")
+            raise
     
     def _load_font(self, session_id: str, font_name: str, font_size: int):
         """
