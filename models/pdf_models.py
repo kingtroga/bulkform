@@ -166,3 +166,20 @@ class FieldPreviewRequest(BaseModel):
     session_id: str
     page: int
     field: dict 
+
+class FieldPreviewFormRequest(BaseModel):
+    """FormData version for preview with image support"""
+    session_id: str
+    page: int
+    field_type: str  # 'text' or 'image'
+    grid_x: int
+    grid_y: int
+    # Text-specific (optional)
+    field_name: Optional[str] = None
+    field_value: Optional[str] = None
+    size: Optional[int] = 12
+    align: Optional[str] = 'center'
+    font: Optional[str] = 'arial'
+    # Image-specific (optional)
+    width: Optional[int] = None
+    height: Optional[int] = None
