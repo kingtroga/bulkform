@@ -120,6 +120,203 @@ async def preview_template_page_one(
             status_code=500, 
             detail="Failed to generate template preview. Try again later."
         )
+    
+@router.post("/{template_id}/preview-field")
+async def preview_template_field(
+    template_id: str,
+    field_name: str = Form(...),
+    field_type: str = Form(...),
+    # Text-specific
+    field_value: str = Form(None),
+    # Image-specific
+    image_name: str = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Preview a single field from a template using the template's stored settings
+    
+    🔒 Requires authentication
+    
+    **USE CASE:** User filling out template wants to see how their input will look
+    
+    **Workflow:**
+    1. Get template from database
+    2. Get field configuration (coordinates, font, size, etc.)
+    3. Download template PDF from storage
+    4. Render field on the appropriate page
+    5. Return preview image
+    
+    **Parameters:**
+    - template_id: Template UUID
+    - field_name: Name of the field (e.g., "first_name")
+    - field_type: "text" or "image"
+    - field_value: Text to preview (for text fields)
+    - image_name: Image name to use (for image fields)
+    
+    **Returns:** PNG image of the page with field rendered
+    """
+    try:
+        # Get template
+        template = template_service.get_template(template_id, current_user['id'])
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found or unauthorized")
+        
+        # Get field configuration
+        field_mappings = template.get('field_mappings', {})
+        if field_name not in field_mappings:
+            raise HTTPException(status_code=400, detail=f"Field '{field_name}' not found in template")
+        
+        field_config = field_mappings[field_name]
+        
+        # Validate field type matches
+        if field_config.get('type') != field_type:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Field type mismatch: expected {field_config.get('type')}, got {field_type}"
+            )
+        
+        # Create temporary preview session
+        import uuid
+        preview_session_id = f"preview_{template_id}_{field_name}_{uuid.uuid4().hex[:8]}"
+        preview_temp_path = f"{pdf_processor.TEMP_FOLDER}/{preview_session_id}"
+        os.makedirs(preview_temp_path, exist_ok=True)
+        
+        try:
+            # Download template PDF
+            pdf_storage_path = template['pdf_url']
+            local_pdf_path = f"{preview_temp_path}/template.pdf"
+            
+            await run_async(
+                pdf_processor.download_file_from_storage,
+                pdf_storage_path,
+                local_pdf_path
+            )
+            
+            # Convert to images
+            num_pages = await run_async(
+                pdf_processor.pdf_to_images,
+                local_pdf_path,
+                preview_session_id
+            )
+            
+            page_number = field_config['page']
+            
+            if page_number > num_pages:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Page {page_number} does not exist (template has {num_pages} pages)"
+                )
+            
+            # Get the page image
+            page_path = f"{preview_temp_path}/page_{page_number}.png"
+            if not os.path.exists(page_path):
+                raise HTTPException(status_code=500, detail="Failed to generate page image")
+            
+            # Create preview copy
+            preview_path = f"{preview_temp_path}/preview_page_{page_number}.png"
+            import shutil
+            await run_async(shutil.copy, page_path, preview_path)
+            
+            # Render field based on type
+            if field_type == 'text':
+                if not field_value:
+                    raise HTTPException(status_code=400, detail="field_value required for text preview")
+                
+                # Prepare text data
+                text_items = [{
+                    'x': field_config['x'],
+                    'y': field_config['y'],
+                    'text': field_value,
+                    'size': field_config.get('size', 12),
+                    'align': field_config.get('align', 'center'),
+                    'font': field_config.get('font', 'arial')
+                }]
+                
+                # Render text on preview
+                await run_async(
+                    pdf_processor.write_text_on_image_preview,
+                    preview_path,
+                    text_items
+                )
+                
+            elif field_type == 'image':
+                if not image_name:
+                    raise HTTPException(status_code=400, detail="image_name required for image preview")
+                
+                # Get user's uploaded image
+                image_result = (
+                    template_service.supabase
+                    .table("user_images")
+                    .select("*")
+                    .eq("user_id", current_user['id'])
+                    .eq("image_name", image_name)
+                    .single()
+                    .execute()
+                )
+                
+                if not image_result.data:
+                    raise HTTPException(
+                        status_code=404, 
+                        detail=f"Image '{image_name}' not found. Please upload it first."
+                    )
+                
+                # Download user's image
+                image_storage_path = image_result.data['storage_path']
+                temp_image_path = f"{preview_temp_path}/temp_image.png"
+                
+                await run_async(
+                    pdf_processor.download_file_from_storage,
+                    image_storage_path,
+                    temp_image_path
+                )
+                
+                # Prepare image data
+                image_items = [{
+                    'x': field_config['x'],
+                    'y': field_config['y'],
+                    'image_path': temp_image_path
+                }]
+                
+                # Add optional dimensions from template
+                if 'width' in field_config:
+                    image_items[0]['width'] = field_config['width']
+                if 'height' in field_config:
+                    image_items[0]['height'] = field_config['height']
+                
+                # Render image on preview
+                await run_async(
+                    pdf_processor.add_images_to_preview,
+                    preview_path,
+                    image_items
+                )
+            
+            # Cleanup function
+            def cleanup_preview():
+                if os.path.exists(preview_temp_path):
+                    try:
+                        shutil.rmtree(preview_temp_path)
+                    except:
+                        pass
+            
+            # Return preview with background cleanup
+            from starlette.background import BackgroundTask
+            return FileResponse(
+                preview_path,
+                media_type="image/png",
+                background=BackgroundTask(cleanup_preview)
+            )
+            
+        except HTTPException:
+            # Cleanup on HTTP errors
+            if os.path.exists(preview_temp_path):
+                shutil.rmtree(preview_temp_path)
+            raise
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Template preview failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Preview generation failed: {str(e)}")
 
 # ============================================================================
 # CUSTOM TEMPLATE ENDPOINTS
