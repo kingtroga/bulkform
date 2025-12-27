@@ -30,6 +30,7 @@ class TemplateService:
         name: str,
         pdf_url: str,
         field_mappings: Dict[str, Any],
+        field_order: list = None,  # ✅ NEW
         description: Optional[str] = None
     ) -> str:
         """
@@ -40,25 +41,24 @@ class TemplateService:
             name: Template name (e.g., "I-485 Form")
             pdf_url: URL to the blank PDF form
             field_mappings: Dictionary of field names to coordinates
-                Example: {
-                    "first_name": {"page": 1, "x": 25, "y": 30, "size": 30, "font": "arial"},
-                    "last_name": {"page": 1, "x": 25, "y": 35, "size": 30, "font": "arial"}
-                }
+            field_order: List of field names in order (optional)
             description: Optional description of the template
             
         Returns:
             UUID string of created template
-            
-        Raises:
-            Exception: If creation fails
         """
         try:
+            # If no field_order provided, extract from field_mappings keys
+            if field_order is None:
+                field_order = list(field_mappings.keys())
+            
             # Prepare data
             template_data = {
                 "user_id": user_id,
                 "name": name,
                 "pdf_url": pdf_url,
                 "field_mappings": field_mappings,
+                "field_order": field_order,  # ✅ NEW
                 "description": description
             }
             
@@ -69,14 +69,14 @@ class TemplateService:
                 raise Exception("Failed to create template - no data returned")
             
             template_id = result.data[0]["id"]
-            print(f"✅ Template created: {template_id} (name: {name})")
+            print(f"✅ Template created: {template_id} (name: {name}) with {len(field_order)} fields in order")
             
             return template_id
         
         except Exception as e:
             print(f"❌ Failed to create template: {str(e)}")
             raise Exception(f"Template creation failed: {str(e)}")
-    
+        
     @cache_template(ttl=3600)
     def get_template(self, template_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -308,6 +308,7 @@ class TemplateService:
         pdf_url: str,
         field_mappings: dict,
         official_form_id: str,
+        field_order: list = None,  # ✅ NEW
         category: str = "immigration",
         description: str = None,
         price: float = 0.00,
@@ -322,6 +323,7 @@ class TemplateService:
             name: Template name
             pdf_url: Storage path to PDF
             field_mappings: Field coordinate mappings
+            field_order: List of field names in CSV order (optional)
             official_form_id: Form ID (e.g., 'i-485')
             category: Template category
             description: Optional description
@@ -331,13 +333,15 @@ class TemplateService:
         
         Returns:
             template_id: UUID of created template
-        
-        Raises:
-            ValueError: If user is not admin
         """
         # Check if user is admin
         if not self.is_admin(user_id):
             raise ValueError("Only admins can create official templates")
+        
+        # If no field_order provided, extract from field_mappings keys
+        if field_order is None:
+            field_order = list(field_mappings.keys())
+            print(f"⚠️ No field_order provided, using field_mappings keys ({len(field_order)} fields)")
         
         template_id = str(uuid.uuid4())
         
@@ -348,25 +352,27 @@ class TemplateService:
             'name': name,
             'pdf_url': pdf_url,
             'field_mappings': field_mappings,
+            'field_order': field_order,  # ✅ NEW
             'is_official': True,
             'official_form_id': official_form_id,
             'category': category,
             'description': description,
-            'price': str(price),  # Store as string (e.g., "10.00")
+            'price': str(price),
             'stripe_price_id': stripe_price_id,
             'complexity': complexity,
-            'rental_duration_days': 365,  # Annual subscription
+            'rental_duration_days': 365,
             'created_at': 'now()'
         }).execute()
         
         print(f"✅ Official template created: {template_id}")
         print(f"   Name: {name}")
         print(f"   Form ID: {official_form_id}")
+        print(f"   Fields: {len(field_mappings)} ({len(field_order)} in order)")
         print(f"   Price: ${price}/year")
         print(f"   Stripe Price ID: {stripe_price_id}")
         
         return template_id
-    
+  
     def is_admin(self, user_id: str) -> bool:
         """
         Check if user is an admin
