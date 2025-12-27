@@ -886,6 +886,7 @@ async def create_official_template(
     official_form_id: str = Form(..., description="Form ID (e.g., 'i-485')"),
     category: str = Form(default="immigration", description="Template category"),
     price: float = Form(default=0.00, description="Annual subscription price in dollars"),
+    field_order: Optional[str] = Form(None, description="JSON array of field names in CSV order"),  # ✅ NEW
     description: Optional[str] = Form(None, description="Template description"),
     current_user: dict = Depends(get_current_user)
 ):
@@ -906,6 +907,7 @@ async def create_official_template(
     - **name**: Template name (required)
     - **official_form_id**: Form ID like 'i-485', 'i-765' (required)
     - **field_mappings**: JSON string of field coordinates (required)
+    - **field_order**: JSON array of field names preserving CSV order (optional)
     - **category**: Category (default: "immigration")
     - **price**: Annual subscription price in dollars (required, e.g., 10.00, 15.00, 25.00)
     - **description**: Optional description
@@ -915,6 +917,8 @@ async def create_official_template(
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
         
         import json
+        
+        # Parse field_mappings
         try:
             field_mappings_dict = json.loads(field_mappings)
         except json.JSONDecodeError:
@@ -922,6 +926,21 @@ async def create_official_template(
                 status_code=400,
                 detail="Invalid field_mappings JSON format"
             )
+        
+        # ✅ Parse field_order (optional, for backward compatibility)
+        field_order_list = None
+        if field_order:
+            try:
+                field_order_list = json.loads(field_order)
+                print(f"✅ Field order received: {len(field_order_list)} fields in CSV order")
+            except json.JSONDecodeError:
+                print("⚠️ Invalid field_order JSON, ignoring...")
+                field_order_list = None
+        
+        # If no field_order provided, use keys from field_mappings (fallback)
+        if not field_order_list:
+            field_order_list = list(field_mappings_dict.keys())
+            print(f"⚠️ No field_order provided, using field_mappings keys order")
         
         if not template_service.validate_field_mappings(field_mappings_dict):
             raise HTTPException(
@@ -1004,11 +1023,13 @@ async def create_official_template(
         else:
             complexity = "complex"
         
+        # ✅ Pass field_order to service layer
         template_id = template_service.create_official_template(
             user_id=user_id,
             name=name,
             pdf_url=storage_path,
             field_mappings=field_mappings_dict,
+            field_order=field_order_list,  # ✅ NEW - Pass the field order
             official_form_id=official_form_id,
             category=category,
             description=description,
@@ -1019,7 +1040,7 @@ async def create_official_template(
         
         return TemplateCreatedResponse(
             template_id=template_id,
-            message=f"Official template created successfully with Stripe product (${price}/year)",
+            message=f"Official template created successfully with Stripe product (${price}/year)" if price > 0 else f"Free official template created successfully",
             stripe_price_id=stripe_price_id
         )
     
@@ -1029,7 +1050,7 @@ async def create_official_template(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create official template: {str(e)}")
-
+    
 # ============================================================================
 # UTILITY ENDPOINTS
 # ============================================================================
