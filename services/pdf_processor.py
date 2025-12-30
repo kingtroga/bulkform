@@ -35,7 +35,6 @@ def scan_available_fonts():
 # Configuration
 GRID_SIZE = 150
 DPI = 300
-MIN_CELL_SIZE = 3
 TEMP_FOLDER = "temp_pdf_uploads"
 GRIDDED_FOLDER = "gridded_pages"
 OUTPUT_FOLDER = "filled_pages"
@@ -62,22 +61,6 @@ class PDFProcessor:
         self.supabase = get_supabase()
         
         self.setup_folders()
-
-    def _calculate_grid_size(self, width: int, height: int) -> int:
-        """
-        Calculate optimal grid size for given dimensions
-        Rule: Each cell must be at least MIN_CELL_SIZE pixels
-        """
-        max_grid_size = min(
-            width // self.MIN_CELL_SIZE,
-            height // self.MIN_CELL_SIZE,
-            self.BASE_GRID_SIZE
-        )
-        
-        # Round to nearest 10 for clean numbers
-        grid_size = (max_grid_size // 10) * 10
-    
-        return max(10, grid_size)  # Never go below 10x10
     
     def setup_folders(self):
         """Create necessary folders"""
@@ -243,9 +226,8 @@ class PDFProcessor:
         except Exception as e:
             raise IOError(f"Failed to open page {page_num}: {str(e)}")
         
-        grid_size = self._calculate_grid_size(width, height)
-        cell_width = width / grid_size  # FLOAT
-        cell_height = height / grid_size  # FLOAT
+        cell_width = width / self.GRID_SIZE
+        cell_height = height / self.GRID_SIZE
         
         draw = ImageDraw.Draw(img)
         
@@ -266,8 +248,8 @@ class PDFProcessor:
                 alignment = item.get('align', 'top')
                 font_name = item.get('font', 'arial')
                 
-                pixel_x = grid_x * cell_width  # Remove int()
-                pixel_y = grid_y * cell_height  # Remove int()
+                pixel_x = int(grid_x * cell_width)
+                pixel_y = int(grid_y * cell_height)
                 
                 # Load font with fallback
                 try:
@@ -337,8 +319,8 @@ class PDFProcessor:
                 font_name = item.get('font', 'arial')
                 
                 # Convert grid to pixel
-                pixel_x = int(grid_x * cell_width)
-                pixel_y = int(grid_y * cell_height)
+                pixel_x = grid_x * cell_width
+                pixel_y = grid_y * cell_height
                 
                 # Load font with fallback
                 try:
@@ -776,9 +758,19 @@ class PDFProcessor:
             raise Exception(f"Failed to restore session: {str(e)}")
         
     def apply_grid_to_page(self, session_id: str, page_num: int) -> str:
-        """Apply grid overlay with ADAPTIVE sizing"""
+        """
+        Apply grid overlay to a page image
+        
+        Args:
+            session_id: Session identifier
+            page_num: Page number
+            
+        Returns:
+            Path to gridded image
+        """
         input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
         
+        # Create gridded folder for session
         gridded_folder = f"{self.GRIDDED_FOLDER}/{session_id}"
         os.makedirs(gridded_folder, exist_ok=True)
         output_path = f"{gridded_folder}/page_{page_num}_gridded.png"
@@ -786,52 +778,49 @@ class PDFProcessor:
         img = Image.open(input_path)
         width, height = img.size
         
-        # 🚀 ADAPTIVE GRID SIZE
-        grid_size = self._calculate_grid_size(width, height)
-        
-        print(f"📐 Page {page_num}: {width}x{height}px → Grid: {grid_size}x{grid_size} (cell: {width/grid_size:.1f}x{height/grid_size:.1f}px)")
-        
-        cell_width = width / grid_size
-        cell_height = height / grid_size
+        cell_width = width / self.GRID_SIZE
+        cell_height = height / self.GRID_SIZE
         
         draw = ImageDraw.Draw(img)
         
-        # ✨ ADAPTIVE LINE WIDTH
-        if grid_size >= 120:
-            major_width = 2
-            minor_width = 1
-        else:
-            major_width = 1
-            minor_width = 1
-        
-        # Draw grid lines with FLOAT coordinates
-        for i in range(grid_size + 1):
-            x = i * cell_width  # Float!
-            y = i * cell_height  # Float!
+        # Draw grid lines
+        for i in range(self.GRID_SIZE + 1):
+            x = int(i * cell_width)
+            y = int(i * cell_height)
             
-            line_width = major_width if i % 10 == 0 else minor_width
+            line_width = 3 if i % 10 == 0 else 1
             line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
             
             draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
             draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
         
-        # Labels - only every 10th line
+        # Add grid labels
         try:
-            font_size = max(8, int(width / 100))
+            font_size = max(8, int(width / 150))
             font = ImageFont.truetype("fonts/arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
         
-        for i in range(0, grid_size + 1, 10):
-            x = i * cell_width
-            y = i * cell_height
-            text = str(i)
+        for i in range(self.GRID_SIZE + 1):
+            x = int(i * cell_width)
+            y = int(i * cell_height)
             
-            draw.text((x + 2, 2), text, fill=(255, 0, 0), font=font)
+            # X-axis labels (vertical text at top)
+            text = f"{i}"
+            # Create a temporary image for the text
+            txt_img = Image.new('RGBA', (font_size * 3, font_size * len(text) * 2), (255, 255, 255, 0))
+            txt_draw = ImageDraw.Draw(txt_img)
+            txt_draw.text((0, 0), text, fill=(255, 0, 0), font=font)
+            # Rotate 90 degrees counter-clockwise
+            txt_img = txt_img.rotate(90, expand=True)
+            # Paste at the top (y=0)
+            img.paste(txt_img, (x + 2, -5), txt_img)
+            
+            # Y-axis labels (horizontal at left)
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
-        print(f"Applied {grid_size}x{grid_size} grid to page {page_num}")
+        print(f"Applied grid to page {page_num}")
         return output_path
 
     def download_file_from_storage(self, storage_path: str, local_path: str):
