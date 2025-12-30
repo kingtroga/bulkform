@@ -39,6 +39,104 @@ def pdf_to_images(pdf_path):
     return len(images)
 
 def apply_grid(image_path, output_path):
+    """Apply grid overlay to image with ADAPTIVE grid size"""
+    img = Image.open(image_path)
+    width, height = img.size
+    
+    # 🚀 ADAPTIVE GRID SIZE
+    min_cell_size = 3
+    max_grid_size = min(width // min_cell_size, height // min_cell_size, 150)
+    grid_size = (max_grid_size // 10) * 10
+    
+    print(f"📐 Page: {width}x{height}px → Grid: {grid_size}x{grid_size} (cell: {width/grid_size:.1f}x{height/grid_size:.1f}px)")
+    
+    cell_width = width / grid_size
+    cell_height = height / grid_size
+    
+    draw = ImageDraw.Draw(img)
+    
+    # ✨ ADAPTIVE LINE WIDTH - THIN VERSION
+    # Smaller grids = thinner lines to avoid chunky look
+    if grid_size >= 120:
+        major_width = 2
+        minor_width = 1
+    elif grid_size >= 80:
+        major_width = 1
+        minor_width = 1
+    else:
+        major_width = 1
+        minor_width = 1
+    
+    # Draw grid lines with FLOAT coordinates
+    for i in range(grid_size + 1):
+        x = i * cell_width
+        y = i * cell_height
+        
+        # Use adaptive widths
+        line_width = major_width if i % 10 == 0 else minor_width
+        line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
+        
+        draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
+        draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
+    
+    # Labels - only every 10th line
+    try:
+        font_size = max(8, int(width / 100))
+        font = ImageFont.truetype(r"fonts\arial.ttf", font_size)
+    except:
+        font = ImageFont.load_default()
+    
+    for i in range(0, grid_size + 1, 10):
+        x = i * cell_width
+        y = i * cell_height
+        draw.text((x + 2, 2), f"{i}", fill=(255, 0, 0), font=font)
+        draw.text((2, y + 2), f"{i}", fill=(0, 0, 255), font=font)
+    
+    img.save(output_path)
+    return grid_size
+
+def write_text_on_image(page_num, text_data, grid_size=150):
+    """Write text - now accepts dynamic grid_size"""
+    input_path = f"{TEMP_FOLDER}/page_{page_num}.png"
+    output_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
+    
+    img = Image.open(input_path)
+    width, height = img.size
+    
+    # ✅ FLOAT PRECISION
+    cell_width = width / grid_size
+    cell_height = height / grid_size
+    
+    draw = ImageDraw.Draw(img)
+    
+    for item in text_data:
+        grid_x = item['x']
+        grid_y = item['y']
+        text = item['text']
+        font_size = item.get('size', 20)
+        alignment = item.get('align', 'top')
+        
+        # ✅ FLOAT PRECISION - Only round at final pixel placement
+        pixel_x = grid_x * cell_width
+        pixel_y = grid_y * cell_height
+        
+        try:
+            font = ImageFont.truetype("fonts/arial.ttf", font_size)
+        except:
+            font = ImageFont.load_default()
+        
+        # Adjust Y based on alignment
+        if alignment == 'bottom':
+            adjusted_y = pixel_y - font_size
+        elif alignment == 'center':
+            adjusted_y = pixel_y - (font_size // 2)
+        else:
+            adjusted_y = pixel_y
+        
+        draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
+        print(f"  ✅ '{text}' at grid ({grid_x}, {grid_y}) → pixel ({pixel_x:.1f}, {adjusted_y:.1f})")
+    
+    img.save(output_path)
     """Apply grid overlay to image"""
     img = Image.open(image_path)
     width, height = img.size
@@ -88,49 +186,6 @@ def display_image(image_path):
     """Display image using system default viewer"""
     img = Image.open(image_path)
     img.show()
-
-def write_text_on_image(page_num, text_data):
-    """Write text on image at specified coordinates with alignment support"""
-    input_path = f"{TEMP_FOLDER}/page_{page_num}.png"
-    output_path = f"{OUTPUT_FOLDER}/page_{page_num}_filled.png"
-    
-    img = Image.open(input_path)
-    width, height = img.size
-    
-    cell_width = width / GRID_SIZE
-    cell_height = height / GRID_SIZE
-    
-    draw = ImageDraw.Draw(img)
-    
-    for item in text_data:
-        grid_x = item['x']
-        grid_y = item['y']
-        text = item['text']
-        font_size = item.get('size', 20)
-        alignment = item.get('align', 'top')  # NEW: Get alignment, default to 'top'
-        
-        pixel_x = int(grid_x * cell_width)
-        pixel_y = int(grid_y * cell_height)
-        
-        try:
-            font = ImageFont.truetype("fonts/arial.ttf", font_size)
-            print("worked")
-        except:
-            font = ImageFont.load_default()
-        
-        # NEW: Adjust Y position based on alignment
-        if alignment == 'bottom':
-            adjusted_y = pixel_y - font_size
-        elif alignment == 'center':
-            adjusted_y = pixel_y - (font_size // 2)
-        else:  # 'top' (default)
-            adjusted_y = pixel_y
-        
-        draw.text((pixel_x, adjusted_y), text, fill=(0, 0, 0), font=font)
-        print(f"  Wrote '{text}' at ({grid_x}, {grid_y}) [align: {alignment}]")
-    
-    img.save(output_path)
-    print(f"Saved filled page: {output_path}")
 
 def create_output_pdf(num_pages, single_page=None):
     """Create final PDF from filled pages"""
