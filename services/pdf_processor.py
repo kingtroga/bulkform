@@ -244,7 +244,10 @@ class PDFProcessor:
                 grid_x = item['x']
                 grid_y = item['y']
                 text = item['text']
-                font_size = item.get('size', 20)
+                # Scale font size for DPI (300 DPI = 2x larger images)
+                requested_size = item.get('size', 20)
+                dpi_scale_factor = self.DPI / 150  # Original DPI was 150
+                font_size = int(requested_size * dpi_scale_factor)
                 alignment = item.get('align', 'top')
                 font_name = item.get('font', 'arial')
                 
@@ -314,7 +317,10 @@ class PDFProcessor:
                 grid_x = item['x']
                 grid_y = item['y']
                 text = item['text']
-                font_size = item.get('size', 20)
+                # Scale font size for DPI
+                requested_size = item.get('size', 20)
+                dpi_scale_factor = self.DPI / 150
+                font_size = int(requested_size * dpi_scale_factor)
                 alignment = item.get('align', 'center')
                 font_name = item.get('font', 'arial')
                 
