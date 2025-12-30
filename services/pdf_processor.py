@@ -35,6 +35,7 @@ def scan_available_fonts():
 # Configuration
 GRID_SIZE = 150
 DPI = 300
+MIN_CELL_SIZE = 3
 TEMP_FOLDER = "temp_pdf_uploads"
 GRIDDED_FOLDER = "gridded_pages"
 OUTPUT_FOLDER = "filled_pages"
@@ -61,6 +62,22 @@ class PDFProcessor:
         self.supabase = get_supabase()
         
         self.setup_folders()
+
+    def _calculate_grid_size(self, width: int, height: int) -> int:
+        """
+        Calculate optimal grid size for given dimensions
+        Rule: Each cell must be at least MIN_CELL_SIZE pixels
+        """
+        max_grid_size = min(
+            width // self.MIN_CELL_SIZE,
+            height // self.MIN_CELL_SIZE,
+            self.BASE_GRID_SIZE
+        )
+        
+        # Round to nearest 10 for clean numbers
+        grid_size = (max_grid_size // 10) * 10
+    
+        return max(10, grid_size)  # Never go below 10x10
     
     def setup_folders(self):
         """Create necessary folders"""
@@ -226,8 +243,9 @@ class PDFProcessor:
         except Exception as e:
             raise IOError(f"Failed to open page {page_num}: {str(e)}")
         
-        cell_width = width / self.GRID_SIZE
-        cell_height = height / self.GRID_SIZE
+        grid_size = self._calculate_grid_size(width, height)
+        cell_width = width / grid_size  # FLOAT
+        cell_height = height / grid_size  # FLOAT
         
         draw = ImageDraw.Draw(img)
         
@@ -248,8 +266,8 @@ class PDFProcessor:
                 alignment = item.get('align', 'top')
                 font_name = item.get('font', 'arial')
                 
-                pixel_x = int(grid_x * cell_width)
-                pixel_y = int(grid_y * cell_height)
+                pixel_x = grid_x * cell_width  # Remove int()
+                pixel_y = grid_y * cell_height  # Remove int()
                 
                 # Load font with fallback
                 try:
@@ -758,61 +776,53 @@ class PDFProcessor:
             raise Exception(f"Failed to restore session: {str(e)}")
         
     def apply_grid_to_page(self, session_id: str, page_num: int) -> str:
-        """
-        Apply grid overlay to a page image
-        
-        Args:
-            session_id: Session identifier
-            page_num: Page number
-            
-        Returns:
-            Path to gridded image
-        """
+        """Apply grid overlay with ADAPTIVE sizing"""
         input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
-
-        # 🔍 DIAGNOSTIC
-        print(f"🔍 apply_grid_to_page() for session {session_id}, page {page_num}")
-        print(f"🔍 Input image path: {input_path}")
-        print(f"🔍 Input exists: {os.path.exists(input_path)}")
         
-        # Create gridded folder for session
         gridded_folder = f"{self.GRIDDED_FOLDER}/{session_id}"
         os.makedirs(gridded_folder, exist_ok=True)
         output_path = f"{gridded_folder}/page_{page_num}_gridded.png"
         
         img = Image.open(input_path)
         width, height = img.size
-
-        # 🔍 DIAGNOSTIC
-        print(f"🔍 Original page image size: {width} x {height}")
-        print(f"🔍 GRID_SIZE: {self.GRID_SIZE}")
-        print(f"🔍 DPI: {self.DPI}")
         
-        cell_width = width / self.GRID_SIZE
-        cell_height = height / self.GRID_SIZE
+        # 🚀 ADAPTIVE GRID SIZE
+        grid_size = self._calculate_grid_size(width, height)
+        
+        print(f"📐 Page {page_num}: {width}x{height}px → Grid: {grid_size}x{grid_size} (cell: {width/grid_size:.1f}x{height/grid_size:.1f}px)")
+        
+        cell_width = width / grid_size
+        cell_height = height / grid_size
         
         draw = ImageDraw.Draw(img)
         
-        # Draw grid lines with FLOAT coordinates (no rounding!)
-        for i in range(self.GRID_SIZE + 1):
-            x = i * cell_width  # ← KEEP AS FLOAT
-            y = i * cell_height  # ← KEEP AS FLOAT
+        # ✨ ADAPTIVE LINE WIDTH
+        if grid_size >= 120:
+            major_width = 2
+            minor_width = 1
+        else:
+            major_width = 1
+            minor_width = 1
+        
+        # Draw grid lines with FLOAT coordinates
+        for i in range(grid_size + 1):
+            x = i * cell_width  # Float!
+            y = i * cell_height  # Float!
             
-            line_width = 3 if i % 10 == 0 else 1
+            line_width = major_width if i % 10 == 0 else minor_width
             line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
             
-            # PIL handles float coords perfectly with anti-aliasing
             draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
             draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
         
         # Labels - only every 10th line
         try:
-            font_size = max(8, int(width / 150))
+            font_size = max(8, int(width / 100))
             font = ImageFont.truetype("fonts/arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
         
-        for i in range(0, self.GRID_SIZE + 1, 10):
+        for i in range(0, grid_size + 1, 10):
             x = i * cell_width
             y = i * cell_height
             text = str(i)
@@ -821,15 +831,9 @@ class PDFProcessor:
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
-
-        # 🔍 DIAGNOSTIC - Check saved image
-        saved_img = Image.open(output_path)
-        saved_width, saved_height = saved_img.size
-        print(f"🔍 Saved gridded image size: {saved_width} x {saved_height}")
-        print(f"🔍 Size match: {saved_width == width and saved_height == height}")
-        print(f"Applied grid to page {page_num}")
+        print(f"Applied {grid_size}x{grid_size} grid to page {page_num}")
         return output_path
-    
+
     def download_file_from_storage(self, storage_path: str, local_path: str):
         """
         Downloads a file from the configured Supabase Storage bucket 
