@@ -20,4 +20,4 @@ COPY . .
 EXPOSE 8000
 
 # ONLY run FastAPI (no Celery!)
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

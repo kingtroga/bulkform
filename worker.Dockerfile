@@ -17,5 +17,5 @@ RUN pip install --no-cache-dir uv && \
 # Copy application code
 COPY . .
 
-# ONLY run Celery worker
-CMD ["uv", "run", "celery", "-A", "celery_tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2", "--max-tasks-per-child=1"]
+# ONLY run Celery worker (same command from your start.sh)
+CMD ["uv", "run", "celery", "-A", "celery_config", "worker", "--loglevel=info", "--concurrency=10", "-Q", "pdf_processing,zip_creation,celery", "-E"]
