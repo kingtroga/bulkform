@@ -793,40 +793,31 @@ class PDFProcessor:
         
         draw = ImageDraw.Draw(img)
         
-        # Draw grid lines
+        # Draw grid lines with FLOAT coordinates (no rounding!)
         for i in range(self.GRID_SIZE + 1):
-            x = int(i * cell_width)
-            y = int(i * cell_height)
+            x = i * cell_width  # ← KEEP AS FLOAT
+            y = i * cell_height  # ← KEEP AS FLOAT
             
             line_width = 3 if i % 10 == 0 else 1
             line_color = (150, 150, 150) if i % 10 == 0 else (220, 220, 220)
             
+            # PIL handles float coords perfectly with anti-aliasing
             draw.line([(x, 0), (x, height)], fill=line_color, width=line_width)
             draw.line([(0, y), (width, y)], fill=line_color, width=line_width)
         
-        # Add grid labels
+        # Labels - only every 10th line
         try:
             font_size = max(8, int(width / 150))
             font = ImageFont.truetype("fonts/arial.ttf", font_size)
         except:
             font = ImageFont.load_default()
         
-        for i in range(self.GRID_SIZE + 1):
-            x = int(i * cell_width)
-            y = int(i * cell_height)
+        for i in range(0, self.GRID_SIZE + 1, 10):
+            x = i * cell_width
+            y = i * cell_height
+            text = str(i)
             
-            # X-axis labels (vertical text at top)
-            text = f"{i}"
-            # Create a temporary image for the text
-            txt_img = Image.new('RGBA', (font_size * 3, font_size * len(text) * 2), (255, 255, 255, 0))
-            txt_draw = ImageDraw.Draw(txt_img)
-            txt_draw.text((0, 0), text, fill=(255, 0, 0), font=font)
-            # Rotate 90 degrees counter-clockwise
-            txt_img = txt_img.rotate(90, expand=True)
-            # Paste at the top (y=0)
-            img.paste(txt_img, (x + 2, -5), txt_img)
-            
-            # Y-axis labels (horizontal at left)
+            draw.text((x + 2, 2), text, fill=(255, 0, 0), font=font)
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
@@ -838,7 +829,7 @@ class PDFProcessor:
         print(f"🔍 Size match: {saved_width == width and saved_height == height}")
         print(f"Applied grid to page {page_num}")
         return output_path
-
+    
     def download_file_from_storage(self, storage_path: str, local_path: str):
         """
         Downloads a file from the configured Supabase Storage bucket 
