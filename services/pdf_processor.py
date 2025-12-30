@@ -248,8 +248,8 @@ class PDFProcessor:
                 alignment = item.get('align', 'top')
                 font_name = item.get('font', 'arial')
                 
-                pixel_x = int(grid_x * cell_width)
-                pixel_y = int(grid_y * cell_height)
+                pixel_x = grid_x * cell_width
+                pixel_y = grid_y * cell_height
                 
                 # Load font with fallback
                 try:
