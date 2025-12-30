@@ -769,6 +769,11 @@ class PDFProcessor:
             Path to gridded image
         """
         input_path = f"{self.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+
+        # 🔍 DIAGNOSTIC
+        print(f"🔍 apply_grid_to_page() for session {session_id}, page {page_num}")
+        print(f"🔍 Input image path: {input_path}")
+        print(f"🔍 Input exists: {os.path.exists(input_path)}")
         
         # Create gridded folder for session
         gridded_folder = f"{self.GRIDDED_FOLDER}/{session_id}"
@@ -777,6 +782,11 @@ class PDFProcessor:
         
         img = Image.open(input_path)
         width, height = img.size
+
+        # 🔍 DIAGNOSTIC
+        print(f"🔍 Original page image size: {width} x {height}")
+        print(f"🔍 GRID_SIZE: {self.GRID_SIZE}")
+        print(f"🔍 DPI: {self.DPI}")
         
         cell_width = width / self.GRID_SIZE
         cell_height = height / self.GRID_SIZE
@@ -820,6 +830,12 @@ class PDFProcessor:
             draw.text((2, y + 2), text, fill=(0, 0, 255), font=font)
         
         img.save(output_path)
+
+        # 🔍 DIAGNOSTIC - Check saved image
+        saved_img = Image.open(output_path)
+        saved_width, saved_height = saved_img.size
+        print(f"🔍 Saved gridded image size: {saved_width} x {saved_height}")
+        print(f"🔍 Size match: {saved_width == width and saved_height == height}")
         print(f"Applied grid to page {page_num}")
         return output_path
 
