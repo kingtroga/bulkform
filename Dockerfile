@@ -1,4 +1,4 @@
-# Dockerfile (existing - modify it)
+# Dockerfile (FastAPI only)
 FROM python:3.12-slim
 
 # Install system dependencies
@@ -20,4 +20,5 @@ COPY . .
 EXPOSE 8000
 
 # ONLY run FastAPI (no Celery!)
-CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use shell form to expand $PORT variable
+CMD uv run uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
