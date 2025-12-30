@@ -1,4 +1,4 @@
-# Dockerfile (existing - modify it)
+# worker.Dockerfile
 FROM python:3.12-slim
 
 # Install system dependencies
@@ -17,7 +17,5 @@ RUN pip install --no-cache-dir uv && \
 # Copy application code
 COPY . .
 
-EXPOSE 8000
-
-# ONLY run FastAPI (no Celery!)
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# ONLY run Celery worker
+CMD ["uv", "run", "celery", "-A", "celery_tasks.celery_app", "worker", "--loglevel=info", "--concurrency=2", "--max-tasks-per-child=1"]
