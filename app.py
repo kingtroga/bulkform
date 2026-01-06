@@ -103,6 +103,31 @@ app.add_middleware(
 )
 
 
+# ============================================================================
+# SECURITY HEADERS MIDDLEWARE - Added for security disclosure
+# ============================================================================
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+    
+    # HSTS - Force HTTPS
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+    
+    # Prevent MIME sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    
+    # Block unnecessary browser features
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    
+    # CSP for API (restrictive since it's backend)
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    
+    return response
+
 # Import routers AFTER limiter is set up (to avoid circular imports)
 from routes.basic_auth import router as basic_auth_router
 from routes.token_auth import router as token_auth_router
