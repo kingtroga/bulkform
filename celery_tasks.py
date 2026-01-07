@@ -94,6 +94,11 @@ def compute_apply_pages(repeat_cfg: Dict, num_pages_src: int) -> List[int]:
 def expand_field_mappings_from_source_page(field_mappings: Dict, source_page: int, target_pages: List[int]) -> Dict:
     """
     Take mappings on source_page and stamp them onto each target page.
+
+    ✅ Supports selective non-repeating fields:
+    - Default: repeat/stamp
+    - If field_config has `repeat: false` -> field stays ONLY on source_page (not stamped to other pages)
+
     IMPORTANT: stamped mappings read values from the ORIGINAL field name via "__client_key__".
     """
     source_page = int(source_page)
@@ -106,12 +111,23 @@ def expand_field_mappings_from_source_page(field_mappings: Dict, source_page: in
     if not source:
         raise ValueError(f"No field mappings found on source_page={source_page}")
 
-    out = dict(field_mappings or {})  # keep existing mappings too
+    out = dict(field_mappings or {})  # keep existing mappings too (including single-page fields elsewhere)
 
     for p in targets:
         for fname, cfg in source.items():
+            # ✅ NEW: allow field to opt-out of stamping
+            should_repeat = cfg.get("repeat", True)
+            if should_repeat is False:
+                # Ensure it exists on source_page, but never stamp onto other pages
+                if p == source_page:
+                    new_cfg = dict(cfg)
+                    new_cfg["page"] = source_page
+                    out[fname] = new_cfg
+                continue
+
             new_cfg = dict(cfg)
             new_cfg["page"] = p
+
             if p == source_page:
                 out[fname] = new_cfg
             else:
@@ -496,6 +512,7 @@ def fill_single_pdf_sync(
     - repeated:
         mode="pages"          -> your existing "clone pages per repeat row" behavior
         mode="apply_to_pages" -> stamp source_page mappings onto repeat_pages within the SAME PDF
+                                 while allowing specific source-page fields to opt-out via repeat:false
     """
     print("\n" + "=" * 80)
     print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index}")
