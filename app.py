@@ -108,24 +108,32 @@ app.add_middleware(
 # ============================================================================
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
-    """Add security headers to all responses"""
     response = await call_next(request)
-    
-    # HSTS - Force HTTPS
+
+    # Security headers (always on)
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-    
-    # Prevent MIME sniffing
     response.headers["X-Content-Type-Options"] = "nosniff"
-    
-    # Prevent clickjacking
     response.headers["X-Frame-Options"] = "DENY"
-    
-    # Block unnecessary browser features
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-    
-    # CSP for API (restrictive since it's backend)
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-    
+
+    path = request.url.path
+
+    # 🔓 Relax CSP ONLY for docs + schema
+    if path.startswith("/docs") or path.startswith("/redoc") or path.startswith("/openapi.json"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
+            "style-src 'self' 'unsafe-inline' https:; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' https:; "
+            "frame-ancestors 'none';"
+        )
+    else:
+        # 🔒 Lock down API
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+
     return response
 
 # Import routers AFTER limiter is set up (to avoid circular imports)
@@ -180,9 +188,9 @@ if IS_PRODUCTION:
         
         return get_swagger_ui_html(
             openapi_url="/openapi.json",
-            title="BulkForm API - Documentation",
-            swagger_favicon_url="https://fastapi.tiangolo.com/img/favicon.png"
+            title="BulkForm API - Documentation"
         )
+
 
     @app.get("/redoc", include_in_schema=False)
     async def get_redoc_documentation(credentials: HTTPBasicCredentials = Depends(security)):
@@ -199,9 +207,9 @@ if IS_PRODUCTION:
         
         return get_redoc_html(
             openapi_url="/openapi.json",
-            title="BulkForm API - Documentation",
-            redoc_favicon_url="https://fastapi.tiangolo.com/img/favicon.png"
+            title="BulkForm API - Documentation"
         )
+
 
 
 # ============================================================================

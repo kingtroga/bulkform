@@ -42,12 +42,85 @@ def _safe_json(v):
             return None
     return None
 
+
+# =============================================================================
+# REPEAT CONFIG (UPDATED: supports "pages" + "apply_to_pages")
+# =============================================================================
+
 def validate_repeat_config_min(cfg: Dict):
     if not isinstance(cfg, dict):
         raise ValueError("repeat_config must be a dict/object")
+
     mode = (cfg.get("mode") or "pages").strip().lower()
-    if mode != "pages":
-        raise ValueError("repeat_config.mode must be 'pages' for now")
+    if mode not in ("pages", "apply_to_pages"):
+        raise ValueError("repeat_config.mode must be 'pages' or 'apply_to_pages'")
+
+    rp = cfg.get("repeat_pages")
+    if isinstance(rp, str):
+        rp = _safe_json(rp)
+    if rp is not None and (not isinstance(rp, list) or not rp):
+        raise ValueError("repeat_config.repeat_pages must be a non-empty list")
+
+    if mode == "apply_to_pages":
+        sp = cfg.get("source_page")
+        if sp is None:
+            raise ValueError("repeat_config.source_page is required for apply_to_pages")
+        try:
+            int(sp)
+        except Exception:
+            raise ValueError("repeat_config.source_page must be an integer")
+
+
+def compute_apply_pages(repeat_cfg: Dict, num_pages_src: int) -> List[int]:
+    rp = repeat_cfg.get("repeat_pages")
+    if isinstance(rp, str):
+        rp = _safe_json(rp)
+    pages = [int(x) for x in (rp or [])]
+
+    bad = [p for p in pages if p < 1 or p > num_pages_src]
+    if bad:
+        raise ValueError(f"repeat_pages contains invalid pages {bad}; source PDF has {num_pages_src} pages")
+
+    # de-dupe, keep order
+    seen = set()
+    out = []
+    for p in pages:
+        if p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out
+
+
+def expand_field_mappings_from_source_page(field_mappings: Dict, source_page: int, target_pages: List[int]) -> Dict:
+    """
+    Take mappings on source_page and stamp them onto each target page.
+    IMPORTANT: stamped mappings read values from the ORIGINAL field name via "__client_key__".
+    """
+    source_page = int(source_page)
+    targets = [int(p) for p in target_pages]
+
+    source = {
+        fname: cfg for fname, cfg in (field_mappings or {}).items()
+        if int(cfg.get("page", 1)) == source_page
+    }
+    if not source:
+        raise ValueError(f"No field mappings found on source_page={source_page}")
+
+    out = dict(field_mappings or {})  # keep existing mappings too
+
+    for p in targets:
+        for fname, cfg in source.items():
+            new_cfg = dict(cfg)
+            new_cfg["page"] = p
+            if p == source_page:
+                out[fname] = new_cfg
+            else:
+                stamped_name = f"{fname}__p{p}"
+                new_cfg["__client_key__"] = fname  # read same CSV column
+                out[stamped_name] = new_cfg
+
+    return out
+
 
 def compute_repeat_pages(template: Dict, repeat_cfg: Dict) -> List[int]:
     rp = repeat_cfg.get("repeat_pages")
@@ -60,6 +133,7 @@ def compute_repeat_pages(template: Dict, repeat_cfg: Dict) -> List[int]:
     for _, fc in (template.get("field_mappings") or {}).items():
         pages.add(int(fc.get("page", 1)))
     return sorted(pages) if pages else [1]
+
 
 def extract_repeat_rows(client_data: Dict, repeat_cfg: Dict) -> List[Dict]:
     # 1) __repeats__
@@ -104,6 +178,7 @@ def extract_repeat_rows(client_data: Dict, repeat_cfg: Dict) -> List[Dict]:
 
     return rows
 
+
 def subset_and_remap_field_mappings(field_mappings: Dict, src_page: int, out_page: int) -> Dict:
     out = {}
     for fname, cfg in (field_mappings or {}).items():
@@ -114,9 +189,11 @@ def subset_and_remap_field_mappings(field_mappings: Dict, src_page: int, out_pag
         out[fname] = new_cfg
     return out
 
+
 def temp_png_path(pdf_processor, session_id: str, page_num: int) -> str:
     # ✅ This matches your PDFProcessor implementation exactly
     return f"{pdf_processor.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+
 
 # ============================================================================
 # MEMORY MANAGEMENT
@@ -131,6 +208,7 @@ def force_memory_cleanup():
         libc.malloc_trim(0)
     except:
         pass
+
 
 # ============================================================================
 # CLEANUP UTILITIES
@@ -158,8 +236,9 @@ def cleanup_temp_files(temp_pdf_path: str, temp_image_paths: list, session_id: s
         print(f"🧽 Session folder cleanup done for: {session_id}")
     except Exception as e:
         print(f"⚠️  Session cleanup failed for {session_id}: {e}")
-    
+
     force_memory_cleanup()
+
 
 def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
     if not only_param:
@@ -180,9 +259,11 @@ def parse_item_filter(only_param: Optional[str]) -> Optional[Set[int]]:
                 raise ValueError(f"Invalid item index: {part}")
     return indices
 
+
 # ============================================================================
 # FIELD DATA BUILDER
 # ============================================================================
+
 def resolve_text_style(field_name: str, client_data: Dict, field_config: Dict, batch_options: Dict):
     """
     Precedence:
@@ -277,13 +358,17 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
         field_type = field_config.get('type', 'text')
         print(f"   • Field '{field_name}' → page={page} type={field_type}")
 
+        # ✅ UPDATED: allow stamped fields to read from original CSV key
+        client_key = field_config.get("__client_key__") or field_name
+
         if field_type in ['image', 'signature', 'stamp']:
-            image_ref = client_data.get(field_name, '')
+            # ✅ UPDATED
+            image_ref = client_data.get(client_key, '')
             print(f"     - image_ref: {repr(image_ref)[:120]}")
             if image_ref and str(image_ref).strip():
                 try:
                     image_path = load_image(image_ref, image_service, user_id, temp_image_paths)
-                    
+
                     if page not in images_data:
                         images_data[page] = []
                     w, h = resolve_image_dims(field_name, client_data, field_config, batch_options)
@@ -307,14 +392,15 @@ def build_field_data(field_mappings: Dict, client_data: Dict, image_service, use
         if page not in pages_data:
             pages_data[page] = []
 
-        value = client_data.get(field_name, '')
+        # ✅ UPDATED
+        value = client_data.get(client_key, '')
 
         if field_type == 'checkbox':
             value = handle_checkbox(value, field_config)
 
         font_value, size_value, align_value = resolve_text_style(
             field_name, client_data, field_config, batch_options
-            )
+        )
 
         value = str(value) if value is not None else ''
         entry = {
@@ -340,7 +426,7 @@ def load_image(image_ref: str, image_service, user_id: str, temp_image_paths: li
     if os.path.exists(image_ref):
         print(f"     - Local image found: {image_ref}")
         return image_ref
-    
+
     print(f"     - Downloading image bytes via image_service for ref='{image_ref}'")
     image_bytes = image_service.download_image_bytes(image_ref, user_id)
     if image_bytes:
@@ -388,7 +474,7 @@ def resolve_font_and_size(field_name: str, client_data: Dict, field_config: Dict
         size_value = int(size_value)
     except (ValueError, TypeError):
         size_value = 12
-    
+
     return font_value, size_value
 
 
@@ -407,7 +493,9 @@ def fill_single_pdf_sync(
     """
     Fill a single PDF.
     - standard: current behavior unchanged
-    - repeated: repeat pages mode (clone specified pages per repeat row) into ONE output PDF
+    - repeated:
+        mode="pages"          -> your existing "clone pages per repeat row" behavior
+        mode="apply_to_pages" -> stamp source_page mappings onto repeat_pages within the SAME PDF
     """
     print("\n" + "=" * 80)
     print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index}")
@@ -512,17 +600,75 @@ def fill_single_pdf_sync(
             return {'storage_url': result['storage_url'], 'storage_path': result['storage_path']}
 
         # ====================================================================
-        # MODE B) REPEATED (pages mode)
+        # MODE B) REPEATED (two sub-modes)
         # ====================================================================
+        mode = (repeat_cfg.get("mode") or "pages").strip().lower()
+
+        # --------------------------------------------------------------------
+        # MODE B1) apply_to_pages (STAMP source page mappings onto target pages)
+        # --------------------------------------------------------------------
+        if mode == "apply_to_pages":
+            print("🧷 Repeated template detected. mode=apply_to_pages")
+
+            source_page = int(repeat_cfg.get("source_page") or 1)
+            if source_page < 1 or source_page > num_pages_src:
+                raise Exception(f"source_page={source_page} is invalid; source PDF has {num_pages_src} pages")
+
+            target_pages = compute_apply_pages(repeat_cfg, num_pages_src)
+            print(f"🧷 Stamping mappings from page {source_page} -> pages {target_pages}")
+
+            base_mappings = template.get("field_mappings") or {}
+            stamped_mappings = expand_field_mappings_from_source_page(
+                base_mappings,
+                source_page=source_page,
+                target_pages=target_pages
+            )
+
+            pages_data, images_data, text_count, image_count = build_field_data(
+                stamped_mappings,
+                client_data,
+                image_service,
+                user_id,
+                temp_image_paths,
+                batch_options=batch_options
+            )
+
+            print(f"📋 Field data built (stamped): {text_count} text fields, {image_count} images")
+
+            for page_num in range(1, num_pages_src + 1):
+                print(f"\n🔄 Processing page {page_num}/{num_pages_src}...")
+                pdf_processor.pdf_to_images_single_page(temp_pdf_path, session_id, page_num)
+
+                if page_num in pages_data and pages_data[page_num]:
+                    pdf_processor.write_text_on_page(session_id, page_num, pages_data[page_num])
+
+                if page_num in images_data and images_data[page_num]:
+                    pdf_processor.add_images_to_page(session_id, page_num, images_data[page_num])
+
+                force_memory_cleanup()
+
+            out_name = f"batch_{batch_id}_item_{item_index}.pdf"
+            result = pdf_processor.create_pdf_with_upload(
+                session_id=session_id,
+                user_id=user_id,
+                num_pages=num_pages_src,
+                output_name=out_name
+            )
+
+            cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
+            return {'storage_url': result['storage_url'], 'storage_path': result['storage_path']}
+
+        # --------------------------------------------------------------------
+        # MODE B2) pages (your existing "clone pages per repeat row" behavior)
+        # --------------------------------------------------------------------
         print("🔁 Repeated template detected. mode=pages")
-        validate_repeat_config_min(repeat_cfg)
 
         repeat_pages = compute_repeat_pages(template, repeat_cfg)
         for p in repeat_pages:
             if p < 1 or p > num_pages_src:
                 raise Exception(f"repeat_pages contains invalid page {p}; source PDF has {num_pages_src} pages")
-        repeat_rows = extract_repeat_rows(client_data or {}, repeat_cfg)
 
+        repeat_rows = extract_repeat_rows(client_data or {}, repeat_cfg)
         if not repeat_rows:
             raise Exception("template_kind='repeated' but no repeat rows found in client_data")
 
@@ -549,7 +695,7 @@ def fill_single_pdf_sync(
                 temp_session = f"{session_id}__r{r_idx}__p{src_page}"
                 temp_sessions_to_cleanup.append(temp_session)
 
-                # 1) convert src_page into temp session (creates temp_pdf_uploads/<temp_session>/page_<src_page>.png)
+                # 1) convert src_page into temp session
                 pdf_processor.pdf_to_images_single_page(temp_pdf_path, temp_session, src_page)
 
                 src_img = temp_png_path(pdf_processor, temp_session, src_page)
@@ -618,7 +764,6 @@ def fill_single_pdf_sync(
         raise Exception(f"PDF generation failed: {str(e)}")
 
 
-
 # ============================================================================
 # FILENAME HELPERS
 # ============================================================================
@@ -642,18 +787,19 @@ def generate_pdf_filename(client_data: Dict, item_index: int) -> str:
         first = clean_filename(str(client_data['first_name']))
         if last and first:
             return f"{last}_{first}.pdf"
-    
+
     if 'full_name' in client_data:
         name = clean_filename(str(client_data['full_name']))
         if name:
             return f"{name}.pdf"
-    
+
     if 'name' in client_data:
         name = clean_filename(str(client_data['name']))
         if name:
             return f"{name}.pdf"
-    
+
     return f"document_{item_index + 1}.pdf"
+
 
 # ============================================================================
 # ZIP CREATION
@@ -665,18 +811,18 @@ async def create_batch_zip(
     pdf_items: List[Dict],
     user_id: str
 ) -> str:
-    """Create zip file with all PDFs"""  
+    """Create zip file with all PDFs"""
     pdf_processor = PDFProcessor()
-    
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
         zip_path = tmp_zip.name
     print(f"📦 Creating zip at: {zip_path}")
     print(f"📦 Total PDFs to add: {len(pdf_items)}")
-    
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                
+
                 for idx, item in enumerate(pdf_items, 1):
                     pdf_url = item.get('pdf_url')
                     storage_path = item.get('storage_path')
@@ -684,11 +830,11 @@ async def create_batch_zip(
                     if not pdf_url and not storage_path:
                         print(f"  ⚠️  Item {idx}: No PDF URL or storage path")
                         continue
-                    
+
                     try:
                         client_data = item.get('client_data', {})
                         filename = generate_pdf_filename(client_data, item['item_index'])
-                        
+
                         pdf_bytes = b""
 
                         if storage_path:
@@ -717,35 +863,35 @@ async def create_batch_zip(
                         if not pdf_bytes or len(pdf_bytes) == 0:
                             print(f"  ❌ [{idx}/{len(pdf_items)}] Empty PDF content!")
                             continue
-                        
+
                         print(f"  ✅ [{idx}/{len(pdf_items)}] Downloaded {len(pdf_bytes)} bytes")
-                        
+
                         zipf.writestr(filename, pdf_bytes)
                         print(f"  ✅ [{idx}/{len(pdf_items)}] Added to zip: {filename}")
-                        
+
                     except Exception as e:
                         print(f"  ❌ [{idx}/{len(pdf_items)}] Failed: {str(e)}")
                         continue
-        
+
         zip_size = os.path.getsize(zip_path)
         print(f"📦 Zip file size: {zip_size} bytes")
-        
+
         if zip_size < 100:
             raise Exception("Zip file is empty! No PDFs were added.")
-        
+
         with zipfile.ZipFile(zip_path, 'r') as zipf:
             file_count = len(zipf.namelist())
             print(f"📦 Zip contains {file_count} file(s)")
             if file_count == 0:
                 raise Exception("Zip created but contains no files!")
-        
+
         print(f"📤 Uploading zip to storage...")
         zip_storage_path = f"{user_id}/batches/{batch_id}/download.zip"
-        
+
         with open(zip_path, 'rb') as f:
             zip_data = f.read()
             print(f"📤 Uploading {len(zip_data)} bytes...")
-            
+
             pdf_processor.supabase.storage.from_(
                 pdf_processor.STORAGE_BUCKET
             ).upload(
@@ -753,29 +899,28 @@ async def create_batch_zip(
                 file=zip_data,
                 file_options={"content-type": "application/zip", "upsert": "true"}
             )
-        
+
         signed_url_response = pdf_processor.supabase.storage.from_(
             pdf_processor.STORAGE_BUCKET
         ).create_signed_url(zip_storage_path, 3600)
-        
+
         zip_url = signed_url_response['signedURL']
         cleanup_zip_task.apply_async(
             args=[user_id, batch_id, zip_storage_path],
             countdown=ZIP_TTL_SECONDS
         )
 
-        
         print(f"✅ Zip created successfully!")
         print(f"✅ URL: {zip_url[:80]}...")
-        
+
         force_memory_cleanup()
-        
+
         return zip_url
-    
+
     except Exception as e:
         print(f"❌ Zip creation failed: {str(e)}")
         raise
-    
+
     finally:
         if os.path.exists(zip_path):
             print(f"🧹 Cleaning up temp file: {zip_path}")
@@ -832,25 +977,25 @@ def process_single_pdf_task(
 ):
     """
     Process a SINGLE PDF in parallel.
-    
+
     ✅ CRITICAL: Consumes 1 form AFTER successful PDF creation.
     This ensures accurate billing even if some PDFs fail.
     """
     task_start = time.time()
     print(f"\n🚀 [Worker {self.request.id[:8]}] Processing item {item_index}")
-    
+
     try:
         batch_service = get_batch_service()
         template_service = get_template_service()
-        
+
         batch = batch_service.get_batch(batch_id, user_id) or {}
         batch_options = (batch.get("options") or {})
         batch_service.update_batch_item(item_id, "processing")
-        
+
         template = template_service.get_template(template_id, user_id)
         if not template:
             raise Exception(f"Template not found: {template_id}")
-        
+
         # ============================================================
         # STEP 1: Create the PDF
         # ============================================================
@@ -864,25 +1009,23 @@ def process_single_pdf_task(
             batch_options=batch_options,
         )
         pdf_time = time.time() - pdf_start
-        
+
         # ============================================================
         # STEP 2: ✅ CONSUME 1 FORM (atomic, after success)
         # ============================================================
         if not skip_forms_consumption:
             from services.entitlement_service import get_entitlement_service
             entitlement_service = get_entitlement_service()
-            
+
             try:
                 consumed = entitlement_service.consume_forms(user_id=user_id, count=1)
                 forms_remaining = consumed.get('forms_remaining', 'unknown')
                 print(f"💰 [Worker {self.request.id[:8]}] ✅ Consumed 1 form. Remaining: {forms_remaining}")
             except Exception as consume_error:
-                # ⚠️  This is critical - log but don't fail the task
-                # The PDF was successfully created, this is a billing/tracking error
+                # ⚠️  Log but don't fail the task
                 print(f"⚠️  [Worker {self.request.id[:8]}] ❌ Forms consumption FAILED: {consume_error}")
                 print(f"⚠️  PDF was created successfully but billing not recorded!")
-                # You might want to add this to a dead-letter queue or alert system
-        
+
         # ============================================================
         # STEP 3: Mark item as completed
         # ============================================================
@@ -892,12 +1035,12 @@ def process_single_pdf_task(
             pdf_url=result['storage_url'],
             storage_path=result['storage_path']
         )
-        
+
         task_time = time.time() - task_start
         print(f"✅ [Worker {self.request.id[:8]}] Item {item_index} done in {task_time:.1f}s (PDF: {pdf_time:.1f}s)")
-        
+
         force_memory_cleanup()
-        
+
         return {
             'item_id': item_id,
             'item_index': item_index,
@@ -905,20 +1048,20 @@ def process_single_pdf_task(
             'storage_path': result['storage_path'],
             'processing_time': task_time
         }
-    
+
     except Exception as e:
         error_msg = str(e)
         print(f"❌ [Worker {self.request.id[:8]}] Item {item_index} failed: {error_msg}")
-        
+
         batch_service = get_batch_service()
         batch_service.update_batch_item(
             item_id,
             "failed",
             error_message=error_msg
         )
-        
+
         force_memory_cleanup()
-        
+
         raise self.retry(exc=e, countdown=5, max_retries=2)
 
 
@@ -926,7 +1069,7 @@ def process_single_pdf_task(
 def finalize_batch_task(batch_id: str, user_id: str):
     """Finalize batch after all items processed"""
     print(f"\n🏁 Finalizing batch: {batch_id}")
-    
+
     try:
         batch_service = get_batch_service()
         stats = batch_service.get_batch_progress(batch_id, user_id)
@@ -948,9 +1091,9 @@ def finalize_batch_task(batch_id: str, user_id: str):
         else:
             batch_service.update_batch_status(batch_id, "processing")
             print(f"⏳ Batch {batch_id} still in progress; leaving status as processing")
-        
+
         force_memory_cleanup()
-        
+
     except Exception as e:
         print(f"❌ Failed to finalize batch: {str(e)}")
 
@@ -967,16 +1110,16 @@ def create_batch_zip_task(
 ):
     """Create zip file asynchronously"""
     print(f"\n📦 Creating zip for batch: {batch_id}")
-    
+
     try:
         batch_service = get_batch_service()
-        
+
         completed_items = batch_service.get_batch_items(batch_id, status="completed")
-        
+
         if not completed_items:
             print(f"⚠️  No completed items to zip")
             return None
-        
+
         pdf_items = [
             {
                 "item_index": item["item_index"],
@@ -986,10 +1129,10 @@ def create_batch_zip_task(
             }
             for item in completed_items
         ]
-        
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         zip_url = loop.run_until_complete(
             create_batch_zip(
                 batch_id=batch_id,
@@ -998,17 +1141,17 @@ def create_batch_zip_task(
                 user_id=user_id
             )
         )
-        
+
         loop.close()
-        
+
         batch_service.update_batch_status(batch_id, "completed", download_url=zip_url)
-        
+
         print(f"✅ Zip created: {zip_url[:80]}...")
-        
+
         force_memory_cleanup()
-        
+
         return zip_url
-    
+
     except Exception as e:
         print(f"❌ Zip creation failed: {str(e)}")
         raise
@@ -1019,25 +1162,24 @@ def create_batch_zip_task(
 # ============================================================================
 
 def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str, skip_forms_consumption: bool = False):
-    # ...
     """Trigger parallel processing of entire batch"""
     print(f"\n⚡ PARALLEL PROCESSING START: {batch_id}")
     start_time = time.time()
-    
+
     batch_service = get_batch_service()
-    
+
     items = batch_service.get_batch_items(batch_id, status="pending")
-    
+
     if not items:
         print(f"⚠️  No items to process")
         return
-    
+
     print(f"📊 Queuing {len(items)} tasks for parallel processing...")
-    
+
     batch_service.update_batch_status(batch_id, "processing")
-    
+
     from celery import group, chord
-    
+
     task_group = group(
         process_single_pdf_task.s(
             batch_id=batch_id,
@@ -1050,15 +1192,15 @@ def trigger_parallel_batch(batch_id: str, user_id: str, template_id: str, skip_f
         )
         for item in items
     )
-    
+
     callback = finalize_batch_task.si(batch_id, user_id)
     job = chord(task_group)(callback)
-    
+
     queue_time = time.time() - start_time
-    
+
     print(f"✅ {len(items)} tasks queued in {queue_time:.2f}s")
     print(f"🔥 Workers will process in parallel!")
     print(f"⏱️  Expected time with 10 workers: ~{len(items) / 10 * 3:.0f}s ({len(items) / 10 * 3 / 60:.1f} min)")
     print(f"💰 Will consume {len(items)} forms when completed")
-    
+
     return job.id
