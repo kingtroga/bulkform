@@ -30,8 +30,10 @@ class TemplateService:
         name: str,
         pdf_url: str,
         field_mappings: Dict[str, Any],
-        field_order: list = None,  # ✅ NEW
-        description: Optional[str] = None
+        field_order: list = None,  
+        description: Optional[str] = None,
+        template_kind: str = "standard",         
+        repeat_config: Optional[Dict[str, Any]] = None 
     ) -> str:
         """
         Create a new PDF template
@@ -58,8 +60,10 @@ class TemplateService:
                 "name": name,
                 "pdf_url": pdf_url,
                 "field_mappings": field_mappings,
-                "field_order": field_order,  # ✅ NEW
-                "description": description
+                "field_order": field_order,
+                "description": description,
+                "template_kind": template_kind,      
+                "repeat_config": repeat_config       
             }
             
             # Insert into database
@@ -131,7 +135,16 @@ class TemplateService:
                 print("⚠️  Cannot update - template not found/unauthorized/inactive")
                 return False
 
-            allowed_fields = {"name", "description", "pdf_url", "field_mappings", "category"}
+            allowed_fields = {
+                "name", 
+                "description", 
+                "pdf_url", 
+                "field_mappings", 
+                "field_order", 
+                "category", 
+                "template_kind",
+                "repeat_config" }
+            
             filtered_updates = {k: v for k, v in updates.items() if k in allowed_fields}
             if not filtered_updates:
                 print("⚠️  No valid fields to update")
@@ -308,7 +321,9 @@ class TemplateService:
         pdf_url: str,
         field_mappings: dict,
         official_form_id: str,
-        field_order: list = None,  # ✅ NEW
+        field_order: list = None,  
+        template_kind: str = "standard",                
+        repeat_config: Optional[Dict[str, Any]] = None, 
         category: str = "immigration",
         description: str = None,
         price: float = 0.00,
@@ -352,7 +367,9 @@ class TemplateService:
             'name': name,
             'pdf_url': pdf_url,
             'field_mappings': field_mappings,
-            'field_order': field_order,  # ✅ NEW
+            'field_order': field_order, 
+            'template_kind': template_kind,
+            'repeat_config': repeat_config,
             'is_official': True,
             'official_form_id': official_form_id,
             'category': category,

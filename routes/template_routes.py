@@ -6,6 +6,7 @@ API endpoints for managing PDF form templates
 from fastapi import APIRouter, HTTPException, Depends, Query, Form, File, UploadFile
 from typing import Optional, Dict, Any
 import os
+import shutil
 import stripe
 from models.template_models import (
     CreateTemplateRequest,
@@ -214,7 +215,6 @@ async def preview_template_field(
             
             # Create preview copy
             preview_path = f"{preview_temp_path}/preview_page_{page_number}.png"
-            import shutil
             await run_async(shutil.copy, page_path, preview_path)
             
             # Render field based on type
@@ -328,99 +328,87 @@ async def create_template(
     field_mappings: str = Form(..., description="JSON string of field mappings"),
     file: UploadFile = File(..., description="PDF template file"),
     description: Optional[str] = Form(None, description="Template description"),
+    template_kind: str = Form("standard", description="standard | repeated"),
+    repeat_config: Optional[str] = Form(None, description="JSON string repeat config"),
     current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new custom template
-    
+
     🔒 Requires authentication
-    
-    **Upload PDF + field mappings in one request!**
-    
-    - **file**: PDF file to use as template (required)
-    - **name**: Template name (required)
-    - **field_mappings**: JSON string of field coordinates (required)
-    - **description**: Optional description
-    
-    **Example field_mappings:**
-    ```json
-    {
-        "first_name": {"page": 1, "x": 25, "y": 30, "size": 12, "font": "arial"},
-        "last_name": {"page": 1, "x": 25, "y": 35, "size": 12, "font": "arial"}
-    }
-    ```
-    
-    Returns the created template ID
+
+    Upload PDF + field mappings in one request.
+
+    Supports:
+    - template_kind = "standard"
+    - template_kind = "repeated" (requires repeat_config JSON string)
     """
     try:
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
-        
+
         import json
+        import uuid
+
+        # Parse field_mappings JSON
         try:
             field_mappings_dict = json.loads(field_mappings)
         except json.JSONDecodeError:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid field_mappings JSON format"
-            )
-        
+            raise HTTPException(status_code=400, detail="Invalid field_mappings JSON format")
+
         if not template_service.validate_field_mappings(field_mappings_dict):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid field mappings. Check structure and required fields."
-            )
-        
-        from services.pdf_processor import PDFProcessor
-        import uuid
-        
-        pdf_processor = PDFProcessor()
-        user_id = current_user['id']
+            raise HTTPException(status_code=400, detail="Invalid field mappings. Check structure and required fields.")
+
+        # Parse repeat_config JSON (only if repeated)
+        repeat_config_dict = None
+        if template_kind == "repeated":
+            if not repeat_config:
+                raise HTTPException(
+                    status_code=400,
+                    detail="repeat_config is required when template_kind='repeated'"
+                )
+            try:
+                repeat_config_dict = json.loads(repeat_config)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid repeat_config JSON format")
+        else:
+            repeat_config_dict = None
+
+        user_id = current_user["id"]
         template_id = str(uuid.uuid4())
-        
+
+        # Read uploaded file
         file_content = await file.read()
-        
-        import os
-        temp_path = f"/tmp/template_{template_id}.pdf"
-        with open(temp_path, "wb") as f:
-            f.write(file_content)
-        
+
+        # Upload to Supabase Storage
         storage_path = f"templates/{user_id}/{template_id}.pdf"
-        
         try:
-            pdf_processor.supabase.storage.from_(
-                pdf_processor.STORAGE_BUCKET
-            ).upload(
+            pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).upload(
                 storage_path,
                 file_content,
                 file_options={"content-type": "application/pdf"}
             )
         except Exception as e:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise Exception(f"Failed to upload PDF to storage: {str(e)}")
-        
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        
-        template_id = template_service.create_template(
+            raise HTTPException(status_code=500, detail=f"Failed to upload PDF to storage: {str(e)}")
+
+        # Create DB record
+        created_template_id = template_service.create_template(
             user_id=user_id,
             name=name,
             pdf_url=storage_path,
             field_mappings=field_mappings_dict,
-            description=description
-
+            description=description,
+            template_kind=template_kind,
+            repeat_config=repeat_config_dict,
         )
-        
+
         return TemplateCreatedResponse(
-            template_id=template_id,
+            template_id=created_template_id,
             message="Template created successfully"
         )
-    
+
     except HTTPException:
         raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create template: {str(e)}")
 
@@ -684,7 +672,6 @@ async def get_template(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get template: {str(e)}")
 
-
 @router.put("/{template_id}", response_model=TemplateResponse)
 async def update_template(
     template_id: str,
@@ -694,23 +681,29 @@ async def update_template(
     """
     Update existing template (partial):
     - name, description, pdf_url, category
+    - template_kind, repeat_config
     - field_mappings (merge/upsert)
     - remove_fields (delete specific mappings)
     """
-    print(f"[UPDATE_TEMPLATE] user={current_user.get('id')} template_id={template_id} payload={request.dict(exclude_unset=True)}")
+    print(
+        f"[UPDATE_TEMPLATE] user={current_user.get('id')} template_id={template_id} "
+        f"payload={request.dict(exclude_unset=True)}"
+    )
 
     try:
         existing = template_service.get_template(template_id, current_user["id"])
         if not existing:
-            print(f"[UPDATE_TEMPLATE] Template not found or unauthorized for user={current_user.get('id')}")
+            print(f"[UPDATE_TEMPLATE] Template not found/unauthorized user={current_user.get('id')}")
             raise HTTPException(status_code=404, detail="Template not found or unauthorized")
 
+        # Prevent editing official templates unless it's yours (your service logic might already enforce this)
         if existing.get("is_official") and existing.get("user_id") != current_user["id"]:
-            print(f"[UPDATE_TEMPLATE] Forbidden edit attempt on official template={template_id} by user={current_user.get('id')}")
+            print(f"[UPDATE_TEMPLATE] Forbidden edit of official template={template_id}")
             raise HTTPException(status_code=403, detail="Official templates cannot be edited")
 
         updates: Dict[str, Any] = {}
 
+        # Basic fields
         if request.name is not None:
             updates["name"] = request.name
         if request.description is not None:
@@ -718,49 +711,51 @@ async def update_template(
         if request.pdf_url is not None:
             updates["pdf_url"] = request.pdf_url
         if request.category is not None:
-            cat = (request.category or "").strip() or None
-            updates["category"] = cat
-        print(f"[UPDATE_TEMPLATE] Basic updates collected: {updates}")
+            updates["category"] = (request.category or "").strip() or None
 
+        # ✅ NEW: template_kind + repeat_config
+        if request.template_kind is not None:
+            updates["template_kind"] = request.template_kind
+            # If switching away from repeated, wipe repeat_config
+            if request.template_kind != "repeated":
+                updates["repeat_config"] = None
+
+        if request.repeat_config is not None:
+            # Validator already wipes this if template_kind != repeated
+            updates["repeat_config"] = request.repeat_config
+
+        # Field mappings merge/remove
         if request.field_mappings is not None or (request.remove_fields and len(request.remove_fields) > 0):
             existing_mappings = dict(existing.get("field_mappings", {}))
-            print(f"[UPDATE_TEMPLATE] Existing mappings count={len(existing_mappings)}")
 
+            # Remove keys
             for k in (request.remove_fields or []):
                 existing_mappings.pop(k, None)
-                print(f"[UPDATE_TEMPLATE] Removed mapping key={k}")
 
+            # Upsert keys
             for k, v in (request.field_mappings or {}).items():
                 existing_mappings[k] = v
-                print(f"[UPDATE_TEMPLATE] Upserted mapping key={k}")
 
             if not template_service.validate_field_mappings(existing_mappings):
-                print(f"[UPDATE_TEMPLATE] Invalid field mappings detected for template={template_id}")
                 raise HTTPException(status_code=400, detail="Invalid field mappings")
 
             updates["field_mappings"] = existing_mappings
 
         if not updates:
-            print(f"[UPDATE_TEMPLATE] No valid fields to update for template={template_id}")
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        print(f"[UPDATE_TEMPLATE] Applying updates: {list(updates.keys())}")
         updated_ok = template_service.update_template(
             template_id=template_id,
             user_id=current_user["id"],
             updates=updates
         )
-
         if not updated_ok:
-            print(f"[UPDATE_TEMPLATE] update_template() returned False for template={template_id}")
             raise HTTPException(status_code=404, detail="Template not found or unauthorized")
 
         updated = template_service.get_template(template_id, current_user["id"])
-        print(f"[UPDATE_TEMPLATE] Update successful template={template_id}")
         return TemplateResponse(**updated)
 
-    except HTTPException as he:
-        print(f"[UPDATE_TEMPLATE] HTTPException status={he.status_code} detail={he.detail}")
+    except HTTPException:
         raise
     except Exception as e:
         print(f"[UPDATE_TEMPLATE] Unexpected failure: {e}")
@@ -886,92 +881,83 @@ async def create_official_template(
     official_form_id: str = Form(..., description="Form ID (e.g., 'i-485')"),
     category: str = Form(default="immigration", description="Template category"),
     price: float = Form(default=0.00, description="Annual subscription price in dollars"),
-    field_order: Optional[str] = Form(None, description="JSON array of field names in CSV order"),  # ✅ NEW
+    field_order: Optional[str] = Form(None, description="JSON array of field names in CSV order"),
     description: Optional[str] = Form(None, description="Template description"),
+
+    # ✅ NEW
+    template_kind: str = Form("standard", description="standard | repeated"),
+    repeat_config: Optional[str] = Form(None, description="JSON string repeat config"),
+
     current_user: dict = Depends(get_current_user)
 ):
     """
     Create official template with automatic Stripe product/price creation
-    
+
     🔒 ADMIN ONLY
-    
-    **Workflow:**
-    1. Validate admin status
-    2. Upload PDF to Supabase Storage
-    3. Create Stripe Product
-    4. Create Stripe Price (annual subscription)
-    5. Insert template into database with stripe_price_id
-    
-    **Parameters:**
-    - **file**: PDF file (required)
-    - **name**: Template name (required)
-    - **official_form_id**: Form ID like 'i-485', 'i-765' (required)
-    - **field_mappings**: JSON string of field coordinates (required)
-    - **field_order**: JSON array of field names preserving CSV order (optional)
-    - **category**: Category (default: "immigration")
-    - **price**: Annual subscription price in dollars (required, e.g., 10.00, 15.00, 25.00)
-    - **description**: Optional description
+
+    Supports:
+    - template_kind = "standard"
+    - template_kind = "repeated" (requires repeat_config JSON string)
     """
     try:
-        if not file.filename.lower().endswith('.pdf'):
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
-        
+
         import json
-        
+        import uuid
+
         # Parse field_mappings
         try:
             field_mappings_dict = json.loads(field_mappings)
         except json.JSONDecodeError:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid field_mappings JSON format"
-            )
-        
-        # ✅ Parse field_order (optional, for backward compatibility)
+            raise HTTPException(status_code=400, detail="Invalid field_mappings JSON format")
+
+        # Parse field_order (optional)
         field_order_list = None
         if field_order:
             try:
                 field_order_list = json.loads(field_order)
-                print(f"✅ Field order received: {len(field_order_list)} fields in CSV order")
             except json.JSONDecodeError:
-                print("⚠️ Invalid field_order JSON, ignoring...")
                 field_order_list = None
-        
-        # If no field_order provided, use keys from field_mappings (fallback)
+
         if not field_order_list:
             field_order_list = list(field_mappings_dict.keys())
-            print(f"⚠️ No field_order provided, using field_mappings keys order")
-        
+
         if not template_service.validate_field_mappings(field_mappings_dict):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid field mappings. Check structure and required fields."
-            )
-        
-        from services.pdf_processor import PDFProcessor
-        import uuid
-        
-        pdf_processor = PDFProcessor()
-        user_id = current_user['id']
+            raise HTTPException(status_code=400, detail="Invalid field mappings. Check structure and required fields.")
+
+        # ✅ Parse repeat_config (only if repeated)
+        repeat_config_dict = None
+        if template_kind == "repeated":
+            if not repeat_config:
+                raise HTTPException(
+                    status_code=400,
+                    detail="repeat_config is required when template_kind='repeated'"
+                )
+            try:
+                repeat_config_dict = json.loads(repeat_config)
+            except json.JSONDecodeError:
+                raise HTTPException(status_code=400, detail="Invalid repeat_config JSON format")
+
+        user_id = current_user["id"]
         template_id = str(uuid.uuid4())
-        
+
         file_content = await file.read()
-        
         storage_path = f"official_templates/{official_form_id}/{template_id}.pdf"
-        
+
+        # Upload PDF
         try:
-            pdf_processor.supabase.storage.from_(
-                pdf_processor.STORAGE_BUCKET
-            ).upload(
+            pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).upload(
                 storage_path,
                 file_content,
                 file_options={"content-type": "application/pdf"}
             )
         except Exception as e:
-            raise Exception(f"Failed to upload PDF to storage: {str(e)}")
-        
+            raise HTTPException(status_code=500, detail=f"Failed to upload PDF to storage: {str(e)}")
+
         stripe_price_id = None
-        
+
+        # Stripe product/price (only if paid)
         if price > 0:
             try:
                 stripe_product = stripe.Product.create(
@@ -983,74 +969,74 @@ async def create_official_template(
                         "category": category
                     }
                 )
-                
+
                 stripe_price = stripe.Price.create(
                     product=stripe_product.id,
                     unit_amount=int(price * 100),
                     currency="usd",
-                    recurring={
-                        "interval": "year",
-                        "interval_count": 1
-                    },
+                    recurring={"interval": "year", "interval_count": 1},
                     metadata={
                         "template_id": template_id,
                         "official_form_id": official_form_id
                     }
                 )
-                
+
                 stripe_price_id = stripe_price.id
-                
-                print(f"✅ Stripe Product Created: {stripe_product.id}")
-                print(f"✅ Stripe Price Created: {stripe_price_id} (${price}/year)")
-                
+
             except stripe.error.StripeError as e:
+                # Roll back uploaded file if Stripe fails
                 try:
-                    pdf_processor.supabase.storage.from_(
-                        pdf_processor.STORAGE_BUCKET
-                    ).remove([storage_path])
-                except:
+                    pdf_processor.supabase.storage.from_(pdf_processor.STORAGE_BUCKET).remove([storage_path])
+                except Exception:
                     pass
-                
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Stripe integration failed: {str(e)}"
-                )
-        
+
+                raise HTTPException(status_code=500, detail=f"Stripe integration failed: {str(e)}")
+
+        # Complexity heuristic
         if price <= 10:
             complexity = "simple"
         elif price <= 20:
             complexity = "medium"
         else:
             complexity = "complex"
-        
-        # ✅ Pass field_order to service layer
-        template_id = template_service.create_official_template(
+
+        # Create DB record
+        created_template_id = template_service.create_official_template(
             user_id=user_id,
             name=name,
             pdf_url=storage_path,
             field_mappings=field_mappings_dict,
-            field_order=field_order_list,  # ✅ NEW - Pass the field order
+            field_order=field_order_list,
             official_form_id=official_form_id,
             category=category,
             description=description,
             price=price,
             stripe_price_id=stripe_price_id,
-            complexity=complexity
+            complexity=complexity,
+
+            # ✅ NEW
+            template_kind=template_kind,
+            repeat_config=repeat_config_dict,
         )
-        
+
         return TemplateCreatedResponse(
-            template_id=template_id,
-            message=f"Official template created successfully with Stripe product (${price}/year)" if price > 0 else f"Free official template created successfully",
+            template_id=created_template_id,
+            message=(
+                f"Official template created successfully with Stripe product (${price}/year)"
+                if price > 0 else
+                "Free official template created successfully"
+            ),
             stripe_price_id=stripe_price_id
         )
-    
+
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create official template: {str(e)}")
-    
+
+
 # ============================================================================
 # UTILITY ENDPOINTS
 # ============================================================================
