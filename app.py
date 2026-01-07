@@ -85,9 +85,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://www.bulkform.app",
         "https://www.bulkform.app",
-        "http://bulkform.app",
         "https://bulkform.app",
         "http://localhost:3000",
         "http://localhost:8000",
@@ -125,8 +123,8 @@ async def add_security_headers(request: Request, call_next):
             "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; "
             "style-src 'self' 'unsafe-inline' https:; "
             "img-src 'self' data: https:; "
-            "connect-src 'self' https:; "
             "frame-ancestors 'none';"
+            "connect-src 'self' https://www.bulkform.app https://bulkform.app;"
         )
     else:
         # 🔒 Lock down API
