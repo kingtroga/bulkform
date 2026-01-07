@@ -1,4 +1,4 @@
-# Batch Routes Architecture - Updated with Celery & Caching
+# Batch Routes Architecture - Updated with Celery, Caching, and Repeated Templates
 
 ## Module Dependency Graph
 
@@ -39,10 +39,9 @@
                        ▼
             ┌─────────────────────────┐
             │   CELERY TASKS LAYER    │
-            │   (NEW!)                │
             │                         │
             │ • trigger_parallel_batch│
-            │ • process_single_pdf    │
+            │ • process_single_pdf    │  ◀─ UPDATED: handles standard + repeated templates
             │ • finalize_batch        │
             │ • create_zip_task       │
             └────────────┬────────────┘
@@ -63,23 +62,23 @@
             ▼                         ▼
     ┌──────────────────┐    ┌──────────────────┐
     │ TEMPLATE CACHE   │    │ SUPABASE STORAGE │
-    │ (NEW!)           │    │                  │
-    │                  │    │ • PDF Storage    │
-    │ Redis:           │    │ • Image Storage  │
-    │ template:uid:tid │    │ • ZIP Download   │
-    │ (1 hour TTL)     │    │                  │
+    │                  │    │                  │
+    │ Redis:           │    │ • PDF Storage    │
+    │ template:uid:tid │    │ • Image Storage  │
+    │ (1 hour TTL)     │    │ • ZIP Download   │
     │                  │    │                  │
     │ Benefits:        │    │                  │
     │ ✓ 1st worker DB  │    │                  │
-    │ ✓ 99 workers     │    │                  │
+    │ ✓ other workers  │    │                  │
     │   hit cache      │    │                  │
     │ ✓ ~1ms per hit   │    │                  │
     └──────────────────┘    └──────────────────┘
 ```
 
-## Request Flow - WITH CELERY & CACHING
+## Request Flow - WITH CELERY, CACHING, AND REPEATED TEMPLATES
 
 ### 1. Create Batch from CSV
+
 ```
 POST /api/batch/create-from-csv
    ↓
@@ -91,6 +90,7 @@ batch_routes.create_batch_from_csv()
 ```
 
 ### 2. Process Batch (Parallel with Celery)
+
 ```
 POST /api/batch/{id}/process
    ↓
@@ -98,28 +98,43 @@ batch_routes.process_batch()
    ├─ Verify batch ownership
    └─ trigger_parallel_batch(batch_id, user_id, template_id)
        │
-       └─ Celery Task: celery_tasks.trigger_parallel_batch()
+       └─ Celery chord(group(...))(finalize_batch_task)
            ├─ Get all pending items
-           └─ For each item, queue: process_single_pdf_task.delay()
+           └─ For each item, queue: process_single_pdf_task
                │
                └─ Celery Worker receives task
                    │
-                   ├─ ✅ CACHE HIT: template_service.get_template()
-                   │   (first worker: DB + Redis write)
-                   │   (other workers: Redis hit ~1ms)
+                   ├─ ✅ get_template() (cached)
+                   │   ├─ first worker: DB + Redis write
+                   │   └─ other workers: Redis hit (~1ms)
                    │
-                   ├─ fill_single_pdf_sync()
-                   │   ├─ Download template PDF (cached in memory)
-                   │   ├─ Convert to images
-                   │   ├─ Fill text/images/signatures
-                   │   └─ Generate final PDF
+                   ├─ fill_single_pdf_sync()  ◀─ UPDATED
+                   │   ├─ If template_kind="standard":
+                   │   │     - normal per-page field mappings
+                   │   └─ If template_kind="repeated":
+                   │         - mode="apply_to_pages": stamp mappings from source_page to repeat_pages
+                   │         - mode="pages": clone pages per repeat row (existing behavior)
                    │
-                   └─ Upload to Supabase Storage + mark completed
-                       │
-                       └─ (When all items done) trigger finalize_batch()
+                   ├─ Upload to Supabase Storage
+                   ├─ Mark batch_item completed/failed
+                   └─ ✅ Consume 1 form AFTER successful PDF creation
+                       (atomic per completed PDF; failures do not consume)
 ```
 
-### 3. Download Batch with ZIP
+### 3. Finalize Batch (Chord Callback)
+
+```
+finalize_batch_task(batch_id, user_id)
+   ├─ Read batch progress
+   ├─ If pending==0 and processing==0:
+   │   ├─ status = completed | completed_with_errors
+   │   └─ Store final stats
+   └─ If still running:
+       └─ keep status as processing
+```
+
+### 4. Download Batch with ZIP
+
 ```
 GET /api/batch/{id}/download?create_zip=true
    ↓
@@ -130,11 +145,13 @@ batch_routes.download_batch()
        └─ Celery Worker
            ├─ Download all PDFs from storage
            ├─ Create local ZIP
-           ├─ Upload to storage
-           └─ Return signed URL
+           ├─ Upload ZIP to storage
+           └─ Return signed URL (TTL)
 ```
 
-## Caching Strategy - NEW!
+---
+
+## Caching Strategy
 
 ### Template Caching (Redis)
 
@@ -147,12 +164,14 @@ def get_template(self, template_id: str, user_id: str):
 ```
 
 **Cache Key Format:**
+
 ```
 template:{user_id}:{template_id}
 Example: template:a6c3a93a-b1a4-4592-ac53-dba3cf88ae20:41eb78c1-23a2-4f6d-8aed-0ca8d5cfe410
 ```
 
 **Flow for 100 PDFs in batch:**
+
 ```
 Worker 1:
   ├─ 🔄 CACHE MISS → DB query (~50ms)
@@ -166,6 +185,7 @@ Savings: 96% faster for template retrieval
 ```
 
 **Invalidation Triggers:**
+
 ```python
 # When template is updated:
 invalidate_template_cache(template_id, user_id)
@@ -182,46 +202,88 @@ invalidate_template_cache(template_id, user_id)
 # In storage_utils.py:
 _STORAGE_BYTES_CACHE = {}  # Thread-safe with Lock
 
-# Downloaded PDFs cached during batch processing
-# Avoids redundant Supabase downloads within same batch
+# Downloaded PDFs cached during processing
+# Avoids redundant Supabase downloads within same worker/process
 ```
+
+---
+
+## Repeated Templates Support (NEW IN BATCH PROCESSING)
+
+Batch processing does not change how items are queued. It changes how each worker fills the PDF based on template metadata:
+
+### Template Branching
+
+* `template_kind="standard"`: existing behavior
+* `template_kind="repeated"`:
+
+  * `repeat_config.mode="apply_to_pages"`: stamp source_page mappings to repeat_pages within the SAME PDF
+  * `repeat_config.mode="pages"`: clone pages per repeat row (existing behavior)
+
+### Selective Repetition (Apply-to-pages)
+
+Per-field opt-out in `field_mappings`:
+
+```json
+"copy_a_void": {
+  "page": 2,
+  "x": 33,
+  "y": 9,
+  "size": 23,
+  "font": "arial",
+  "type": "text",
+  "repeat": false
+}
+```
+
+Default behavior: fields repeat/stamp.
+If `repeat: false`: field is only applied on `source_page`.
+
+---
 
 ## Performance Metrics - BEFORE vs AFTER
 
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| 100 PDFs processing time | 43 min | 4-5 min | **10-20x faster** |
-| Template lookups per 100 items | 5000ms | ~150ms | **97% ↓** |
-| API response time | Blocking | Non-blocking | **Async** |
-| Worker concurrency | 1 (sequential) | 10 (parallel) | **10x** |
-| Memory per PDF | ~500MB peak | ~100MB | **80% ↓** |
-| Cache hit rate | N/A | 99% (after 1st worker) | **Huge** |
+| Metric                         | Before         | After                  | Improvement       |
+| ------------------------------ | -------------- | ---------------------- | ----------------- |
+| 100 PDFs processing time       | 43 min         | 4-5 min                | **10-20x faster** |
+| Template lookups per 100 items | 5000ms         | ~150ms                 | **97% ↓**         |
+| API response time              | Blocking       | Non-blocking           | **Async**         |
+| Worker concurrency             | 1 (sequential) | 10 (parallel)          | **10x**           |
+| Cache hit rate                 | N/A            | 99% (after 1st worker) | **Huge**          |
+
+---
 
 ## Architecture Improvements
 
 ### Before (Monolithic)
+
 ```
-FastAPI Request → Process ALL 100 PDFs → Return (blocks for 43 min)
+FastAPI Request → Process ALL PDFs → Return (blocks for long time)
 ❌ User gets timeout
 ❌ No progress tracking
-❌ Template queried 100 times
+❌ Template queried many times
 ```
 
-### After (Celery + Caching)
+### After (Celery + Caching + Repeat Support)
+
 ```
-FastAPI Request → Queue 100 tasks → Return immediately
+FastAPI Request → Queue N tasks → Return immediately
     ↓
-Celery Workers (10 parallel)
-    ├─ Template cached after 1st worker
+Celery Workers (parallel)
+    ├─ Template cached after first worker
     ├─ Each worker processes PDF independently
-    ├─ Progress tracked in DB (poll via /progress)
-    └─ 100 PDFs done in ~5 min
+    ├─ Handles standard + repeated templates
+    ├─ Progress tracked in DB
+    └─ Forms consumed only after successful PDF creation
     
-✅ User gets response instantly
-✅ Real-time progress updates
-✅ Template cached (99% cache hits)
-✅ Non-blocking
+✅ Instant API response
+✅ Real-time progress
+✅ Cached template retrieval
+✅ Repeat templates supported
+✅ Accurate billing
 ```
+
+---
 
 ## File Organization
 
@@ -229,33 +291,37 @@ Celery Workers (10 parallel)
 routes/batch/
 ├── router.py              # Main endpoints (FastAPI routes)
 ├── batch_helpers.py       # Constants, validation, utilities
-├── batch_processing.py    # PDF filling logic
+├── batch_processing.py    # PDF filling orchestration
 ├── batch_download.py      # ZIP creation, URL management
 └── storage_utils.py       # Download retries, caching
 
 services/
-├── template_cache.py      # 🆕 Redis template caching decorator
+├── template_cache.py      # Redis template caching decorator
 ├── template_service.py    # Template CRUD (uses cache_template)
 ├── batch_service.py       # Batch DB operations
 └── ...
 
-celery_tasks.py           # 🆕 Celery task definitions
-celery_config.py          # 🆕 Celery configuration
+celery_tasks.py            # Celery task definitions (includes repeated logic in fill)
+celery_config.py           # Celery configuration
 ```
+
+---
 
 ## Key Design Patterns
 
 ### 1. Celery Task Distribution
+
 ```python
 @celery_app.task(bind=True)
 def process_single_pdf_task(self, batch_id, item_id, item_index, ...):
     # Runs on worker pool
     # Retries automatically on failure
-    # Redis stores progress
+    # Consumes form after successful PDF creation
     pass
 ```
 
 ### 2. Cache Decorator (Template Caching)
+
 ```python
 @cache_template(ttl=3600)
 def get_template(self, template_id, user_id):
@@ -264,32 +330,32 @@ def get_template(self, template_id, user_id):
     # Invalidation: explicit call removes from cache
 ```
 
-### 3. Parallel Map Pattern
+### 3. Parallel Map Pattern (Chord)
+
 ```python
-# Distribute 100 items to 10 workers
-for item in pending_items:
-    process_single_pdf_task.delay(
-        batch_id=batch_id,
-        item_id=item['id'],
-        item_index=item['index'],
-        ...
-    )
-# All 10 workers pick up tasks from queue
+from celery import group, chord
+
+task_group = group(process_single_pdf_task.s(...) for item in pending_items)
+callback = finalize_batch_task.si(batch_id, user_id)
+job = chord(task_group)(callback)
 ```
 
 ### 4. Background Task Finalization
+
 ```python
-# All workers done → trigger finalization
 @celery_app.task
-def finalize_batch(batch_id):
-    # Mark batch as completed
-    # Calculate final stats
-    # Cleanup temp files
+def finalize_batch_task(batch_id, user_id):
+    # Mark batch as completed or completed_with_errors
+    # Cleanup and stats
+    pass
 ```
+
+---
 
 ## Configuration
 
 ### Celery (celery_config.py)
+
 ```python
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/1'
@@ -298,6 +364,7 @@ CELERY_RESULT_EXPIRES = 3600  # 1 hour
 ```
 
 ### Workers
+
 ```bash
 uv run celery -A celery_config worker \
   --loglevel=info \
@@ -307,31 +374,39 @@ uv run celery -A celery_config worker \
 ```
 
 ### Template Cache
+
 ```python
 TEMPLATE_CACHE_TTL = 3600  # 1 hour
 TEMPLATE_CACHE_PREFIX = "template:"
 # Redis connection reuses CELERY_BROKER_URL
 ```
 
+---
+
 ## Monitoring & Debugging
 
 ### Cache Logs
+
 ```
-✅ CACHE HIT: template:a6c3a93a-b1a4...:41eb78c1-23a2...
-🔄 CACHE MISS: template:a6c3a93a-b1a4...:41eb78c1-23a2... → Hitting database
-💾 CACHED: template:a6c3a93a-b1a4...:41eb78c1-23a2... for 3600s
-🗑️ Invalidated template cache: template:a6c3a93a-b1a4...:41eb78c1-23a2...
+✅ CACHE HIT: template:...
+🔄 CACHE MISS: template:... → Hitting database
+💾 CACHED: template:... for 3600s
+🗑️ Invalidated template cache: template:...
 ```
 
 ### Worker Logs
+
 ```
 🚀 [Worker abc123] Processing item 5
 ✅ CACHE HIT: template:...
-✍️ Writing text fields...
-✅ [Worker abc123] Item 5 done in 5.2s
+🧩 fill_single_pdf_sync: START
+... (standard or repeated)
+✅ Consumed 1 form (after success)
+✅ [Worker abc123] Item 5 done
 ```
 
 ### Progress Endpoint
+
 ```
 GET /api/batch/{batch_id}/progress
 {
@@ -346,15 +421,19 @@ GET /api/batch/{batch_id}/progress
 }
 ```
 
+---
+
 ## Deployment Changes
 
 ### New Requirements
+
 ```bash
 celery==5.4.0
 redis==5.0.0
 ```
 
 ### New Environment Variables
+
 ```
 REDIS_URL=redis://localhost:6379/0
 CELERY_BROKER_URL=redis://localhost:6379/0
@@ -362,15 +441,15 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/1
 ```
 
 ### Redis Setup
-```bash
-# Local development
-redis-server
 
-# Or Docker
+```bash
+redis-server
+# or
 docker run -d -p 6379:6379 redis:latest
 ```
 
 ### Startup
+
 ```bash
 # Terminal 1: FastAPI
 uv run uvicorn main:app --reload
@@ -379,18 +458,22 @@ uv run uvicorn main:app --reload
 uv run celery -A celery_config worker --loglevel=info --concurrency=10 -Q pdf_processing,zip_creation,celery -E
 ```
 
+---
+
 ## Success Metrics
 
 ✅ **Achieved:**
-- 100 PDFs in 3 minutes (was 43 minutes)
-- 10-20x speedup
-- 99% template cache hit rate after first worker
-- Non-blocking API responses
-- Real-time progress tracking
-- Zero template database queries after first worker (cached)
+
+* 10-20x speedup via parallelism
+* 99% template cache hit rate after first worker
+* Non-blocking API responses
+* Real-time progress tracking
+* Accurate billing (consume after success)
+* Repeated templates supported (apply_to_pages + pages mode)
 
 ✅ **Ready for:**
-- Production deployment
-- Scaling to 30+ workers on paid hosting
-- Multiple users running batches simultaneously
-- Large batches (500+ PDFs)
+
+* Production deployment
+* Scaling to 30+ workers
+* Multiple concurrent users/batches
+* Large batches (500+ PDFs)
