@@ -25,6 +25,99 @@ import gc
 
 ZIP_TTL_SECONDS = 5 * 60 * 60  # 5 hours
 
+import json, re, shutil
+
+def _safe_json(v):
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            return None
+    return None
+
+def validate_repeat_config_min(cfg: Dict):
+    if not isinstance(cfg, dict):
+        raise ValueError("repeat_config must be a dict/object")
+    mode = (cfg.get("mode") or "pages").strip().lower()
+    if mode != "pages":
+        raise ValueError("repeat_config.mode must be 'pages' for now")
+
+def compute_repeat_pages(template: Dict, repeat_cfg: Dict) -> List[int]:
+    rp = repeat_cfg.get("repeat_pages")
+    if isinstance(rp, str):
+        rp = _safe_json(rp)
+    if isinstance(rp, list) and rp:
+        return [int(x) for x in rp]
+
+    pages = set()
+    for _, fc in (template.get("field_mappings") or {}).items():
+        pages.add(int(fc.get("page", 1)))
+    return sorted(pages) if pages else [1]
+
+def extract_repeat_rows(client_data: Dict, repeat_cfg: Dict) -> List[Dict]:
+    # 1) __repeats__
+    r = _safe_json(client_data.get("__repeats__"))
+    if isinstance(r, list) and r:
+        return [x for x in r if isinstance(x, dict)]
+
+    # 2) repeats
+    r = _safe_json(client_data.get("repeats"))
+    if isinstance(r, list) and r:
+        return [x for x in r if isinstance(x, dict)]
+
+    # 3) suffix columns: field_1..field_N
+    suffix_re = re.compile(r"^(?P<base>.+?)_(?P<idx>\d+)$")
+    buckets: Dict[int, Dict] = {}
+    for k, v in (client_data or {}).items():
+        if not isinstance(k, str):
+            continue
+        m = suffix_re.match(k.strip())
+        if not m:
+            continue
+        base = m.group("base").strip()
+        idx = int(m.group("idx"))
+        if idx <= 0:
+            continue
+        buckets.setdefault(idx, {})[base] = v
+
+    if not buckets:
+        return []
+
+    rows = [buckets[i] for i in sorted(buckets.keys())]
+    merge_base = repeat_cfg.get("merge_base_fields", True)
+
+    if merge_base:
+        base_defaults = {str(k).strip(): v for k, v in (client_data or {}).items() if not suffix_re.match(str(k).strip())}
+        merged = []
+        for row in rows:
+            d = dict(base_defaults)
+            d.update(row)
+            merged.append(d)
+        return merged
+
+    return rows
+
+def subset_and_remap_field_mappings(field_mappings: Dict, src_page: int, out_page: int) -> Dict:
+    out = {}
+    for fname, cfg in (field_mappings or {}).items():
+        if int(cfg.get("page", 1)) != int(src_page):
+            continue
+        new_cfg = dict(cfg)
+        new_cfg["page"] = int(out_page)
+        out[fname] = new_cfg
+    return out
+
+def temp_png_path(pdf_processor, session_id: str, page_num: int) -> str:
+    # ✅ This matches your PDFProcessor implementation exactly
+    return f"{pdf_processor.TEMP_FOLDER}/{session_id}/page_{page_num}.png"
+
 # ============================================================================
 # MEMORY MANAGEMENT
 # ============================================================================
@@ -124,7 +217,7 @@ def resolve_text_style(field_name: str, client_data: Dict, field_config: Dict, b
     align = (pf_align or row_align or b_align or t_align or "center")
     align = str(align).lower()
     if align not in ("top", "center", "bottom"):
-        align = "left"
+        align = "top"
     return font, size, align
 
 
@@ -311,109 +404,221 @@ def fill_single_pdf_sync(
     item_index: int,
     batch_options: Dict = None
 ) -> Dict[str, str]:
-    """Fill a single PDF with PAGE-BY-PAGE processing (memory efficient)"""
+    """
+    Fill a single PDF.
+    - standard: current behavior unchanged
+    - repeated: repeat pages mode (clone specified pages per repeat row) into ONE output PDF
+    """
     print("\n" + "=" * 80)
     print(f"🧩 fill_single_pdf_sync: START | batch_id={batch_id} item_index={item_index}")
+
     batch_options = batch_options or {}
-    
+
     pdf_processor = PDFProcessor()
     image_service = get_image_service()
+
     session_id = f"{batch_id}_{item_index}"
     temp_pdf_path = None
     temp_image_paths = []
+    temp_sessions_to_cleanup: List[str] = []
 
     try:
-        # Step 1: Download template PDF
+        # --------------------------------------------------------------------
+        # Step 1: Download template PDF bytes
+        # --------------------------------------------------------------------
         raw_path = template.get('pdf_url', '')
         bucket = pdf_processor.STORAGE_BUCKET
         print(f"📥 Downloading template PDF: {raw_path}")
 
-        try:
-            pdf_bytes = download_with_retries(
-                pdf_processor.supabase,
-                bucket,
-                raw_path,
-                max_attempts=5,
-                base_delay=0.25,
-                template_hint=template.get("name")
-            )
-            print(f"✅ Downloaded: {len(pdf_bytes)} bytes")
-        except Exception as dl_err:
-            print(f"❌ Download failed: {dl_err}")
-            raise
+        pdf_bytes = download_with_retries(
+            pdf_processor.supabase,
+            bucket,
+            raw_path,
+            max_attempts=5,
+            base_delay=0.25,
+            template_hint=template.get("name")
+        )
+        print(f"✅ Downloaded: {len(pdf_bytes)} bytes")
 
+        # --------------------------------------------------------------------
         # Step 2: Save to temp file
+        # --------------------------------------------------------------------
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf', mode='wb') as tmp:
             tmp.write(pdf_bytes)
             temp_pdf_path = tmp.name
         print(f"📄 Temp PDF: {temp_pdf_path}")
 
-        # Step 3: Get page count (WITHOUT loading all pages)
-        num_pages = pdf_processor.get_pdf_page_count(temp_pdf_path)
-        print(f"📊 Total pages: {num_pages}")
+        # --------------------------------------------------------------------
+        # Step 3: Get page count (no full load)
+        # --------------------------------------------------------------------
+        num_pages_src = pdf_processor.get_pdf_page_count(temp_pdf_path)
+        print(f"📊 Source PDF pages: {num_pages_src}")
 
-        # Step 4: Build field data (organize by page)
-        pages_data, images_data, text_count, image_count = build_field_data(
-            template['field_mappings'],
-            client_data,
-            image_service,
-            user_id,
-            temp_image_paths,
-            batch_options=batch_options
-        )
+        # --------------------------------------------------------------------
+        # Step 4: Decide mode
+        # --------------------------------------------------------------------
+        kind = (template.get("template_kind") or "standard").strip().lower()
+        repeat_cfg = template.get("repeat_config") or {}
+        if isinstance(repeat_cfg, str):
+            repeat_cfg = _safe_json(repeat_cfg) or {}
+        if kind == "repeated":
+            validate_repeat_config_min(repeat_cfg)
 
-        print(f"📋 Field data built: {text_count} text fields, {image_count} images")
+        # ====================================================================
+        # MODE A) STANDARD (unchanged)
+        # ====================================================================
+        if kind != "repeated":
+            field_mappings = template.get("field_mappings") or {}
+            pages_data, images_data, text_count, image_count = build_field_data(
+                field_mappings,
+                client_data,
+                image_service,
+                user_id,
+                temp_image_paths,
+                batch_options=batch_options
+            )
 
-        # Step 5: Process each page individually (MEMORY EFFICIENT!)
-        for page_num in range(1, num_pages + 1):
-            print(f"\n🔄 Processing page {page_num}/{num_pages}...")
-            
-            # 5a. Convert ONLY this page to image
-            pdf_processor.pdf_to_images_single_page(temp_pdf_path, session_id, page_num)
-            
-            # 5b. Write text on this page (if any)
-            if page_num in pages_data and pages_data[page_num]:
-                print(f"   ✍️  Writing {len(pages_data[page_num])} text items")
-                pdf_processor.write_text_on_page(session_id, page_num, pages_data[page_num])
-            
-            # 5c. Add images to this page (if any)
-            if page_num in images_data and images_data[page_num]:
-                print(f"   🖼️  Placing {len(images_data[page_num])} images")
-                pdf_processor.add_images_to_page(session_id, page_num, images_data[page_num])
-            
-            # 5d. Force cleanup after each page
-            force_memory_cleanup()
-            print(f"   ✅ Page {page_num} complete")
+            print(f"📋 Field data built: {text_count} text fields, {image_count} images")
 
-        # Step 6: Generate final PDF
+            for page_num in range(1, num_pages_src + 1):
+                print(f"\n🔄 Processing page {page_num}/{num_pages_src}...")
+                pdf_processor.pdf_to_images_single_page(temp_pdf_path, session_id, page_num)
+
+                if page_num in pages_data and pages_data[page_num]:
+                    print(f"   ✍️  Writing {len(pages_data[page_num])} text items")
+                    pdf_processor.write_text_on_page(session_id, page_num, pages_data[page_num])
+
+                if page_num in images_data and images_data[page_num]:
+                    print(f"   🖼️  Placing {len(images_data[page_num])} images")
+                    pdf_processor.add_images_to_page(session_id, page_num, images_data[page_num])
+
+                force_memory_cleanup()
+                print(f"   ✅ Page {page_num} complete")
+
+            out_name = f"batch_{batch_id}_item_{item_index}.pdf"
+            print(f"\n🧪 Creating final PDF: {out_name}")
+            result = pdf_processor.create_pdf_with_upload(
+                session_id=session_id,
+                user_id=user_id,
+                num_pages=num_pages_src,
+                output_name=out_name
+            )
+
+            print(f"✅ PDF uploaded: {result['storage_path']}")
+            cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
+            print(f"🧩 fill_single_pdf_sync: END ✅")
+            print("=" * 80 + "\n")
+
+            return {'storage_url': result['storage_url'], 'storage_path': result['storage_path']}
+
+        # ====================================================================
+        # MODE B) REPEATED (pages mode)
+        # ====================================================================
+        print("🔁 Repeated template detected. mode=pages")
+        validate_repeat_config_min(repeat_cfg)
+
+        repeat_pages = compute_repeat_pages(template, repeat_cfg)
+        for p in repeat_pages:
+            if p < 1 or p > num_pages_src:
+                raise Exception(f"repeat_pages contains invalid page {p}; source PDF has {num_pages_src} pages")
+        repeat_rows = extract_repeat_rows(client_data or {}, repeat_cfg)
+
+        if not repeat_rows:
+            raise Exception("template_kind='repeated' but no repeat rows found in client_data")
+
+        max_repeats = repeat_cfg.get("max_repeats")
+        if isinstance(max_repeats, (int, float)) and max_repeats > 0:
+            repeat_rows = repeat_rows[: int(max_repeats)]
+
+        total_out_pages = len(repeat_rows) * len(repeat_pages)
+        print(f"🔁 repeat_pages={repeat_pages} repeats={len(repeat_rows)} => out_pages={total_out_pages}")
+
+        # We'll generate base PNGs into temp sessions, then copy them into MAIN session temp folder
+        out_page_counter = 0
+
+        for r_idx, row_data in enumerate(repeat_rows, start=1):
+            merged_data = dict(client_data or {})
+            merged_data.update(row_data or {})
+
+            print(f"\n🔁 Repeat {r_idx}/{len(repeat_rows)}")
+
+            for src_page in repeat_pages:
+                out_page_counter += 1
+                out_page = out_page_counter
+
+                temp_session = f"{session_id}__r{r_idx}__p{src_page}"
+                temp_sessions_to_cleanup.append(temp_session)
+
+                # 1) convert src_page into temp session (creates temp_pdf_uploads/<temp_session>/page_<src_page>.png)
+                pdf_processor.pdf_to_images_single_page(temp_pdf_path, temp_session, src_page)
+
+                src_img = temp_png_path(pdf_processor, temp_session, src_page)
+                if not os.path.exists(src_img):
+                    raise Exception(f"Missing converted image: {src_img}")
+
+                # 2) copy base PNG into MAIN session temp folder as page_<out_page>.png
+                dst_img = temp_png_path(pdf_processor, session_id, out_page)
+                os.makedirs(os.path.dirname(dst_img), exist_ok=True)
+                shutil.copy(src_img, dst_img)
+
+                # 3) build mappings only for src_page, remapped to out_page
+                remapped = subset_and_remap_field_mappings(template.get("field_mappings") or {}, src_page, out_page)
+
+                pages_data, images_data, _, _ = build_field_data(
+                    remapped,
+                    merged_data,
+                    image_service,
+                    user_id,
+                    temp_image_paths,
+                    batch_options=batch_options
+                )
+
+                # 4) apply text/images onto the out_page using MAIN session_id
+                if out_page in pages_data and pages_data[out_page]:
+                    pdf_processor.write_text_on_page(session_id, out_page, pages_data[out_page])
+
+                if out_page in images_data and images_data[out_page]:
+                    pdf_processor.add_images_to_page(session_id, out_page, images_data[out_page])
+
+                force_memory_cleanup()
+                print(f"   ✅ out_page {out_page} done (from src_page {src_page})")
+
+        # 5) create final PDF using total_out_pages
         out_name = f"batch_{batch_id}_item_{item_index}.pdf"
-        print(f"\n🧪 Creating final PDF: {out_name}")
         result = pdf_processor.create_pdf_with_upload(
             session_id=session_id,
             user_id=user_id,
-            num_pages=num_pages,
+            num_pages=total_out_pages,
             output_name=out_name
         )
 
-        print(f"✅ PDF uploaded: {result['storage_path']}")
+        # cleanup temp conversion sessions
+        for s in temp_sessions_to_cleanup:
+            try:
+                pdf_processor.cleanup_folders(s)
+            except Exception:
+                pass
 
-        # Step 7: Cleanup
         cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
 
-        print(f"🧩 fill_single_pdf_sync: END ✅")
-        print("=" * 80 + "\n")
-
-        return {
-            'storage_url': result['storage_url'],
-            'storage_path': result['storage_path']
-        }
+        return {'storage_url': result['storage_url'], 'storage_path': result['storage_path']}
 
     except Exception as e:
         print(f"⛔ ERROR: {e}")
+
+        # Cleanup temp sessions if any
+        for s in temp_sessions_to_cleanup:
+            try:
+                pdf_processor.cleanup_folders(s)
+            except Exception:
+                pass
+
         cleanup_temp_files(temp_pdf_path, temp_image_paths, session_id, pdf_processor)
         print("=" * 80 + "\n")
         raise Exception(f"PDF generation failed: {str(e)}")
-    
+
+
+
 # ============================================================================
 # FILENAME HELPERS
 # ============================================================================
@@ -465,7 +670,6 @@ async def create_batch_zip(
     
     with tempfile.NamedTemporaryFile(delete=False, suffix='.zip', mode='wb') as tmp_zip:
         zip_path = tmp_zip.name
-    
     print(f"📦 Creating zip at: {zip_path}")
     print(f"📦 Total PDFs to add: {len(pdf_items)}")
     

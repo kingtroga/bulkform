@@ -3,8 +3,8 @@ Template Models
 Pydantic models for template API requests/responses
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 
 
@@ -20,13 +20,29 @@ class CreateTemplateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="Template name")
     description: Optional[str] = Field(None, max_length=1000, description="Template description")
     field_mappings: str = Field(..., description="JSON string of field mappings")
+    template_kind: Literal["standard", "repeated"] = Field(
+        default="standard",
+        description="Template kind: standard or repeated"
+    )
+    repeat_config: Optional[str] = Field(
+        default=None,
+        description="JSON string repeat config (only for repeated templates)"
+    )
+    @model_validator(mode="after")
+    def _validate_repeat_config(self):
+        if self.template_kind != "repeated":
+            # keep it clean; routes/services can ignore too
+            self.repeat_config = None
+        return self
     
     class Config:
         json_schema_extra = {
             "example": {
-                "name": "My Custom I-485",
-                "description": "Custom I-485 template",
-                "field_mappings": '{"first_name": {"page": 1, "x": 25, "y": 30, "size": 30, "font": "arial"}}'
+                "name": "My Repeated I-485",
+                "description": "Repeating employment history pages",
+                "field_mappings": "{\"employer_name\": {\"page\": 1, \"x\": 25, \"y\": 30}}",
+                "template_kind": "repeated",
+                "repeat_config": "{\"mode\":\"pages\",\"base_page\":1,\"repeat_pages\":[1,2,3]}"
             }
         }
 
@@ -39,14 +55,30 @@ class UpdateTemplateRequest(BaseModel):
     category: Optional[str] = Field(None, max_length=255)
     field_mappings: Optional[Dict[str, Any]] = None
     remove_fields: Optional[List[str]] = None
+
+    template_kind: Optional[Literal["standard", "repeated"]] = None
+    repeat_config: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _validate_repeat_config(self):
+        # if someone explicitly sets template_kind to standard, wipe repeat_config
+        if self.template_kind and self.template_kind != "repeated":
+            self.repeat_config = None
+        return self
     
     class Config:
         json_schema_extra = {
             "example": {
-                "name": "Updated Template Name",
-                "description": "Updated description"
+                "name": "Updated Repeated Template",
+                "template_kind": "repeated",
+                "repeat_config": {
+                    "mode": "pages",
+                    "base_page": 2,
+                    "repeat_pages": [2, 3, 4]
+                }
             }
         }
+
 
 
 class CreateOfficialTemplateRequest(BaseModel):
@@ -58,21 +90,37 @@ class CreateOfficialTemplateRequest(BaseModel):
     official_form_id: str = Field(..., min_length=1, max_length=50, description="Form ID (e.g., 'i-485')")
     category: str = Field(default="immigration", description="Template category")
     price: float = Field(default=0.00, ge=0, description="Price in dollars")
+    template_kind: Literal["standard", "repeated"] = Field(default="standard")
+    repeat_config: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _validate_repeat_config(self):
+        if self.template_kind != "repeated":
+            self.repeat_config = None
+        return self
+    
     
     class Config:
         json_schema_extra = {
             "example": {
-                "name": "USCIS Form I-485",
-                "description": "Official I-485 template",
+                "name": "USCIS I-485 Employment History",
+                "description": "Official repeated section for employment history",
                 "pdf_url": "https://uscis.gov/i-485.pdf",
                 "field_mappings": {
-                    "family_name": {"page": 1, "x": 25, "y": 30, "size": 30}
+                    "employer_name": {"page": 1, "x": 25, "y": 30}
                 },
-                "official_form_id": "i-485",
+                "official_form_id": "i-485-employment",
                 "category": "immigration",
-                "price": 0.00
+                "price": 0.00,
+                "template_kind": "repeated",
+                "repeat_config": {
+                    "mode": "pages",
+                    "base_page": 1,
+                    "repeat_pages": [1, 2, 3]
+                }
             }
         }
+
 
 
 # ============================================================================
@@ -87,6 +135,9 @@ class TemplateResponse(BaseModel):
     description: Optional[str]
     pdf_url: str
     field_mappings: Dict[str, Any]
+    field_order: Optional[List[str]] = None
+    template_kind: Literal["standard", "repeated"] = "standard"
+    repeat_config: Optional[Dict[str, Any]] = None
     is_official: bool = False
     official_form_id: Optional[str] = None
     category: Optional[str] = None
@@ -101,20 +152,25 @@ class TemplateResponse(BaseModel):
             "example": {
                 "id": "abc-123-def-456",
                 "user_id": "user-789",
-                "name": "USCIS Form I-485",
-                "description": "Green card application",
+                "name": "Repeated Employment History",
+                "description": "Repeats same fields across multiple pages",
                 "pdf_url": "https://uscis.gov/i-485.pdf",
-                "field_mappings": {"first_name": {"page": 1, "x": 25, "y": 30}},
-                "is_official": True,
-                "official_form_id": "i-485",
-                "category": "immigration",
-                "price": 0.00,
-                "downloads": 1234,
-                "rating": 4.8,
+                "field_mappings": {
+                    "employer_name": {"page": 1, "x": 25, "y": 30}
+                },
+                "field_order": ["employer_name"],
+                "template_kind": "repeated",
+                "repeat_config": {
+                    "mode": "pages",
+                    "base_page": 1,
+                    "repeat_pages": [1, 2, 3]
+                },
+                "is_official": False,
                 "created_at": "2025-11-03T10:00:00Z",
                 "updated_at": "2025-11-03T10:00:00Z"
             }
         }
+
 
 
 class TemplateListResponse(BaseModel):
