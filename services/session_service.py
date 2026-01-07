@@ -24,7 +24,8 @@ class SessionService:
         session_id: str, 
         user_id: str, 
         filename: str, 
-        num_pages: int
+        num_pages: int = 0,
+        original_filename: Optional[str] = None
     ) -> Dict:
         """
         Create a new PDF session in database
@@ -38,13 +39,18 @@ class SessionService:
         Returns:
             Session data from database
         """
-        result = self.supabase.table("pdf_sessions").insert({
+        payload = {
             "session_id": session_id,
             "user_id": user_id,
             "filename": filename,
             "num_pages": num_pages,
-            "status": "processing"
-        }).execute()
+            "status": "queued",
+            "progress": 0,
+        }
+        if original_filename:
+            payload["original_filename"] = original_filename
+
+        result = self.supabase.table("pdf_sessions").insert(payload).execute()
 
         data = result.data[0] if result.data else None
 
@@ -73,7 +79,14 @@ class SessionService:
         self, 
         session_id: str, 
         status: str,
-        storage_path: Optional[str] = None
+        storage_path: Optional[str] = None,
+        progress: Optional[int] = None,
+        error_message: Optional[str] = None,
+        num_pages: Optional[int] = None,
+        pages: Optional[dict] = None,
+        dpi: Optional[int] = None,
+        grid_size: Optional[int] = None,
+        original_storage_path: Optional[str] = None,
     ) -> Dict:
         """
         Update session status and storage path
@@ -84,17 +97,28 @@ class SessionService:
             storage_path: Path in Supabase storage (optional)
         """
         update_data = {
-            "status": status,
-            "updated_at": datetime.now().isoformat()
+        "status": status,
+        "updated_at": datetime.now().isoformat(),
         }
-        
-        if storage_path:
+
+        if storage_path is not None:
             update_data["storage_path"] = storage_path
-        
-        result = self.supabase.table("pdf_sessions").update(
-            update_data
-        ).eq("session_id", session_id).execute()
-        
+        if progress is not None:
+            update_data["progress"] = progress
+        if error_message is not None:
+            update_data["error_message"] = error_message
+        if num_pages is not None:
+            update_data["num_pages"] = num_pages
+        if pages is not None:
+            update_data["pages"] = pages
+        if dpi is not None:
+            update_data["dpi"] = dpi
+        if grid_size is not None:
+            update_data["grid_size"] = grid_size
+        if original_storage_path is not None:
+            update_data["original_storage_path"] = original_storage_path
+
+        result = self.supabase.table("pdf_sessions").update(update_data).eq("session_id", session_id).execute()
         return result.data[0] if result.data else None
     
     @cache_user_sessions(ttl=300)
