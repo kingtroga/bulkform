@@ -507,7 +507,6 @@ async def preview_single_field(
         preview_path = f"{pdf_processor.TEMP_FOLDER}/{request_session_id}/preview_temp_{request_page}.png"
         
         # Copy original to preview
-        import shutil
         await run_async(shutil.copy, page_path, preview_path)
         
         # Handle based on field type
