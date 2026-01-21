@@ -3,20 +3,37 @@ from PIL import Image, ImageDraw, ImageFont
 import uuid
 import re
 
-def wrap_text(text: str, max_chars_per_line: int = 28) -> str:
+def wrap_text(text: str, max_chars_per_line: int = 40, manual_breaks: bool = False) -> str:
     """
     Wrap text with specific word count rules:
-    - Line 1: Max 4 words
-    - Line 2: Max 5 words (gets remaining words)
-    - If last word on line 1 is >6 chars, move it to line 2
+    - If manual_breaks=True, use user's \n breaks (no auto-wrapping)
+    - Otherwise: Auto wrap with max 4 words line 1, 5 words lines 2-3
     """
+    
+    # Check if user provided manual line breaks
+    if '\n' in text or manual_breaks:
+        lines = text.split('\n')
+        
+        # VALIDATION: Only 4 lines allowed
+        if len(lines) > 4:
+            raise ValueError(f"Too many lines! Got {len(lines)} lines, max is 4")
+        
+        # VALIDATION: Max chars per line
+        for i, line in enumerate(lines, 1):
+            if len(line) > max_chars_per_line:
+                raise ValueError(f"Line {i} too long! '{line}' ({len(line)} chars, max {max_chars_per_line})")
+        
+        return '\n'.join(lines)
+    
+    # AUTO-WRAP MODE (original logic)
     words = text.split()
     
-    # Force split if more than 4 words
+    # Single line case
     if len(words) <= 4:
-        # Single line case
         lines = [' '.join(words)]
-    else:
+    
+    # Two line case
+    elif len(words) <= 9:  # 4 + 5 = 9 words max for 2 lines
         # Split at 4 words
         line1_words = words[:4]
         line2_words = words[4:]
@@ -30,25 +47,50 @@ def wrap_text(text: str, max_chars_per_line: int = 28) -> str:
         line2 = ' '.join(line2_words)
         lines = [line1, line2]
     
-    # VALIDATION: Check word count
-    if len(lines) == 2:
-        line1_word_count = len(lines[0].split())
-        line2_word_count = len(lines[1].split())
+    # Three line case
+    else:
+        # Line 1: First 4 words
+        line1_words = words[:4]
+        remaining = words[4:]
         
+        # Check if last word of line 1 is too long (>6 chars)
+        if line1_words and len(line1_words[-1]) > 6:
+            # Move last word to remaining
+            remaining.insert(0, line1_words.pop())
+        
+        # Line 2: Next 5 words
+        line2_words = remaining[:5]
+        line3_words = remaining[5:]
+        
+        line1 = ' '.join(line1_words)
+        line2 = ' '.join(line2_words)
+        line3 = ' '.join(line3_words)
+        lines = [line1, line2, line3]
+    
+    # VALIDATION: Check word count (only for auto-wrap)
+    if len(lines) >= 2:
+        line1_word_count = len(lines[0].split())
         if line1_word_count > 4:
             raise ValueError(f"Line 1 has {line1_word_count} words, max is 4")
-        
+    
+    if len(lines) >= 2:
+        line2_word_count = len(lines[1].split())
         if line2_word_count > 5:
             raise ValueError(f"Line 2 has {line2_word_count} words, max is 5")
+    
+    if len(lines) >= 3:
+        line3_word_count = len(lines[2].split())
+        if line3_word_count > 5:
+            raise ValueError(f"Line 3 has {line3_word_count} words, max is 5")
     
     # VALIDATION: Max chars per line
     for i, line in enumerate(lines, 1):
         if len(line) > max_chars_per_line:
             raise ValueError(f"Line {i} too long! '{line}' ({len(line)} chars, max {max_chars_per_line})")
     
-    # VALIDATION: Only 2 lines allowed
-    if len(lines) > 2:
-        raise ValueError(f"Title too long! Got {len(lines)} lines, max is 2")
+    # VALIDATION: Only 4 lines allowed
+    if len(lines) > 4:
+        raise ValueError(f"Title too long! Got {len(lines)} lines, max is 4")
     
     return '\n'.join(lines)
 
@@ -79,7 +121,7 @@ def generate_cover_image(title: str, output_folder: str = "output", base_image_p
     draw = ImageDraw.Draw(image)
     
     # Wrap title text for better fit
-    wrapped_title = wrap_text(title, max_chars_per_line=28)
+    wrapped_title = wrap_text(title, max_chars_per_line=40)
     
     # Load Inter font
     try:
@@ -95,8 +137,8 @@ def generate_cover_image(title: str, output_folder: str = "output", base_image_p
                 font_title = ImageFont.load_default()
                 print("⚠️ Warning: Using default font. For best results, install Inter font.")
     
-    # Fixed left margin position
-    text_x = 150
+    # SHIFTED LEFT: 80px from left edge
+    text_x = 80
     text_y = 130
     
     # Add text shadow for better readability
@@ -127,11 +169,14 @@ if __name__ == "__main__":
     print()
     
     # Get text from user
-    title = input("Enter blog title/summary (will be wrapped): ").strip()
+    title = input("Enter blog title/summary (use \\n for manual line breaks): ").strip()
     
     if not title:
         print("❌ Error: Title cannot be empty")
         exit(1)
+    
+    # Replace literal \n with actual newlines
+    title = title.replace('\\n', '\n')
     
     try:
         # Generate the cover
@@ -144,10 +189,11 @@ if __name__ == "__main__":
         print(f"❌ Error: {e}")
         print()
         print("💡 Tips:")
-        print("   - Keep titles under 9 words")
-        print("   - Each line should be max 28 characters")
-        print("   - Line 1: max 4 words")
-        print("   - Line 2: max 5 words")
+        print("   - Use \\n to manually control line breaks")
+        print("   - Max 4 lines")
+        print("   - Each line max 40 characters")
+        print()
+        print("   Example: One mistake could cost\\nsomeone their life.\\n- Immigration Lawyer, 2026")
         
     except Exception as e:
         print(f"❌ Unexpected error: {e}")

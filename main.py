@@ -11,7 +11,7 @@ import shutil
 
 # Configuration
 GRID_SIZE = 150
-DPI = 300
+DPI = 150
 TEMP_FOLDER = "temp_pages"
 GRIDDED_FOLDER = "gridded_pages"
 OUTPUT_FOLDER = "filled_pages"

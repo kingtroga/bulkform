@@ -442,10 +442,169 @@ async def _add_image_helper(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Add {subfolder} failed: {str(e)}")
 
-
-# ==============================================================================
-# GENERATE FINAL PDF
-# ==============================================================================
+@router.post("/preview-field")
+async def preview_single_field(
+    session_id: str = Form(None),
+    page: int = Form(None),
+    field_type: str = Form(None),
+    grid_x: int = Form(None),
+    grid_y: int = Form(None),
+    # Text-specific fields
+    field_name: str = Form(None),
+    field_value: str = Form(None),
+    size: int = Form(12),
+    align: str = Form('center'),
+    font: str = Form('arial'),
+    # Image-specific fields
+    image_file: UploadFile = File(None),
+    width: int = Form(None),
+    height: int = Form(None),
+    # JSON body for backward compatibility (text-only)
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Render a SINGLE field (text OR image) on a page and return PNG preview
+    
+    🎯 USE CASE: Admin template creator - live field preview before adding
+    
+    **Supports two modes:**
+    1. TEXT: Send field_type='text' with text parameters
+    2. IMAGE: Send field_type='image' with image_file
+    
+    This does NOT save to session - purely for visual confirmation.
+    User sees the field rendered, can confirm or try different position.
+    
+    **Returns:** PNG image with field rendered
+    """
+    
+    # Handle FormData input
+    if session_id and page is not None and field_type:
+        request_session_id = session_id
+        request_page = page
+        request_field_type = field_type
+    else:
+        raise HTTPException(status_code=400, detail="Missing required fields: session_id, page, field_type")
+    
+    # Validate session ownership
+    session = session_service.get_session(request_session_id)
+    if not session or session["user_id"] != current_user['id']:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    preview_path = None
+    temp_image_path = None
+    
+    try:
+        # Get original page image
+        page_path = f"{pdf_processor.TEMP_FOLDER}/{request_session_id}/page_{request_page}.png"
+        
+        if not os.path.exists(page_path):
+            raise HTTPException(status_code=404, detail="Page not found. Session may need to be restored.")
+        
+        # Create temporary preview (don't modify original)
+        preview_path = f"{pdf_processor.TEMP_FOLDER}/{request_session_id}/preview_temp_{request_page}.png"
+        
+        # Copy original to preview
+        await run_async(shutil.copy, page_path, preview_path)
+        
+        # Handle based on field type
+        if request_field_type == 'text':
+            # Validate text inputs
+            if not field_value or not field_value.strip():
+                raise HTTPException(status_code=400, detail="field_value required for text preview")
+            
+            # Prepare text data for rendering
+            text_items = [{
+                'x': grid_x,
+                'y': grid_y,
+                'text': field_value,
+                'size': size or 12,
+                'align': align or 'center',
+                'font': font or 'arial'
+            }]
+            
+            # Draw text on preview
+            await run_async(
+                pdf_processor.write_text_on_image_preview,
+                preview_path,
+                text_items
+            )
+            
+        elif request_field_type == 'image':
+            # Validate image inputs
+            if not image_file:
+                raise HTTPException(status_code=400, detail="image_file required for image preview")
+            
+            if not image_file.content_type in ["image/png", "image/jpeg", "image/jpg"]:
+                raise HTTPException(status_code=400, detail="Only PNG and JPG images allowed")
+            
+            # Save uploaded image temporarily
+            temp_image_path = f"{pdf_processor.TEMP_FOLDER}/{request_session_id}/temp_preview_image_{request_page}.png"
+            
+            image_content = await image_file.read()
+            await run_async(lambda: open(temp_image_path, "wb").write(image_content))
+            
+            # Prepare image data for rendering
+            image_items = [{
+                'x': grid_x,
+                'y': grid_y,
+                'image_path': temp_image_path
+            }]
+            
+            # Add optional dimensions
+            if width:
+                image_items[0]['width'] = width
+            if height:
+                image_items[0]['height'] = height
+            
+            # Draw image on preview
+            await run_async(
+                pdf_processor.add_images_to_preview,
+                preview_path,
+                image_items
+            )
+            
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid field_type: {request_field_type}. Must be 'text' or 'image'")
+        
+        # Return preview image with background task to cleanup
+        def cleanup_preview():
+            if preview_path and os.path.exists(preview_path):
+                try:
+                    os.remove(preview_path)
+                except:
+                    pass
+            if temp_image_path and os.path.exists(temp_image_path):
+                try:
+                    os.remove(temp_image_path)
+                except:
+                    pass
+        
+        return FileResponse(
+            preview_path, 
+            media_type="image/png",
+            background=BackgroundTask(cleanup_preview)
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Preview field failed: {str(e)}")
+        # Cleanup on error
+        if preview_path and os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+            except:
+                pass
+        if temp_image_path and os.path.exists(temp_image_path):
+            try:
+                os.remove(temp_image_path)
+            except:
+                pass
+        raise HTTPException(status_code=500, detail=f"Preview failed: {str(e)}")
+        
+# ============================================================================
+# GENERATE PDF
+# ============================================================================
 
 @router.post("/generate", response_model=GeneratePDFResponse)
 async def generate_pdf(session_id: str, current_user: dict = Depends(get_current_user)):
