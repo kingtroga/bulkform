@@ -50,6 +50,7 @@ class PaymentService:
         
         logger.info(f"Using price ID: {price_id}")
         
+        
         session = stripe.checkout.Session.create(
             mode="subscription",
             line_items=[{"price": price_id, "quantity": 1}],
@@ -61,6 +62,15 @@ class PaymentService:
                 "type": "subscription",
             },
         )
+        logger.warning(
+            "CHECKOUT_CREATE | app_url=%s | success=%s | cancel=%s | env=%s | commit=%s",
+            APP_URL,
+            f"{APP_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            f"{APP_URL}/billing/cancel",
+            os.getenv("ENV", "unknown"),
+            os.getenv("RENDER_GIT_COMMIT", "unknown"),
+            )
+
         
         logger.info(f"✅ Checkout created: {session.id}")
         return session
@@ -89,6 +99,15 @@ class PaymentService:
                 "type": "payg",
             },
         )
+        logger.warning(
+            "CHECKOUT_CREATE | app_url=%s | success=%s | cancel=%s | env=%s | commit=%s",
+            APP_URL,
+            f"{APP_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            f"{APP_URL}/billing/cancel",
+            os.getenv("ENV", "unknown"),
+            os.getenv("RENDER_GIT_COMMIT", "unknown"),
+            )
+
 
         logger.info(f"✅ PAYG checkout created: {session.id}")
         return session
@@ -113,6 +132,15 @@ class PaymentService:
                 "type": "template",
             },
         )
+        logger.warning(
+            "CHECKOUT_CREATE | app_url=%s | success=%s | cancel=%s | env=%s | commit=%s",
+            APP_URL,
+            f"{APP_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            f"{APP_URL}/billing/cancel",
+            os.getenv("ENV", "unknown"),
+            os.getenv("RENDER_GIT_COMMIT", "unknown"),
+            )
+
         
         logger.info(f"✅ Template checkout created: {session.id}")
         return session
@@ -134,6 +162,15 @@ class PaymentService:
                 "type": "library_pass",
             },
         )
+        logger.warning(
+            "CHECKOUT_CREATE | app_url=%s | success=%s | cancel=%s | env=%s | commit=%s",
+            APP_URL,
+            f"{APP_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            f"{APP_URL}/billing/cancel",
+            os.getenv("ENV", "unknown"),
+            os.getenv("RENDER_GIT_COMMIT", "unknown"),
+            )
+
         
         logger.info(f"✅ Library pass checkout created: {session.id}")
         return session
