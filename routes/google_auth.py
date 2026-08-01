@@ -20,7 +20,7 @@ async def google_login():
         response = supabase.auth.sign_in_with_oauth({
             "provider": "google",
             "options": {
-                "redirect_to": "https://bulkform-51hd.onrender.com/api/auth/google/callback"
+                "redirect_to": "https://api.bulkform.app//api/auth/google/callback"
             }
         })
         
