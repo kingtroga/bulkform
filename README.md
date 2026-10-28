@@ -54,7 +54,7 @@ Takes static PDF forms (like T4s, visa applications, HR docs) and fills them aut
 - ZIP download
 - Template caching
 
-### 🚧 **In Progress**
+### ✅ **Others**
 - Payment integration (Stripe/Paystack)
 - Usage tracking & limits
 - Subscription management
@@ -172,10 +172,10 @@ uv run celery -A celery_config worker --loglevel=info --concurrency=10 -Q pdf_pr
 
 ## Deployment
 
-**Hosted on:**
-- Render (FastAPI backend) *PENDING*
-- Supabase (database + storage) *PENDING*
-- Redis Cloud (caching + jobs) *PENDING*
+**Hosted on: DokPloy**
+- FastAPI backend 
+- Supabase (database + storage) 
+- Redis (caching + jobs) 
 
 **Environment:**
 ```bash
@@ -264,7 +264,7 @@ Revenue target: $1,000/month
 - API: Production-ready ✅
 - Auth: Complete ✅
 - Processing: Optimized ✅
-- Payments: In progress 🚧
+- Payments: Complete ✅
 ---
 
 ## Notes to Self
@@ -277,6 +277,6 @@ Revenue target: $1,000/month
 
 ---
 
-**Last Updated:** November 8, 2025  
+**Last Updated:** October 4th, 2026
 **Status:** Production-ready, adding payments  
 **Built by:** Solo founder, remote from Nigeria 🇳🇬
